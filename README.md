@@ -1,36 +1,58 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Trainer
 
-## Getting Started
+A personal, mobile-first workout app. Claude designs your program, plans each day's sets with dynamic branching, and tracks body-composition progress through aligned photo overlays.
 
-First, run the development server:
+Solo project. Built for one user (me).
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
-```
+## Stack
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Next.js 16 (App Router) · React 19 · TypeScript · Tailwind CSS v4 · shadcn/ui · Supabase (Postgres + Auth + Storage) · Drizzle ORM · Claude Sonnet 4.6 · Vitest
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## First-Time Setup
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+1. **Create a Supabase project** at https://supabase.com.
+2. **Configure Google OAuth** — see `docs/superpowers/plans/2026-04-23-plan-1-foundation-auth.md` § Prerequisites.
+3. **Copy env template:**
+   ```bash
+   cp .env.example .env.local
+   ```
+   Fill in every value in `.env.local`.
+4. **Install deps:**
+   ```bash
+   npm install
+   ```
+5. **Apply the DB schema:**
+   ```bash
+   npm run db:migrate
+   ```
+6. **Apply RLS policies + triggers:**
+   ```bash
+   set -a; source .env.local; set +a
+   psql "$DATABASE_URL" -f supabase/policies.sql
+   ```
+   Or paste `supabase/policies.sql` into Supabase Dashboard → SQL Editor and run it.
+7. **Start dev server:**
+   ```bash
+   npm run dev
+   ```
+   Open http://localhost:3000 and sign in with Google.
 
-## Learn More
+## Scripts
 
-To learn more about Next.js, take a look at the following resources:
+- `npm run dev` — start dev server
+- `npm run build` / `npm start` — production
+- `npm test` — run vitest
+- `npm run db:generate` — generate migrations from schema changes
+- `npm run db:migrate` — apply pending migrations
+- `npm run db:studio` — open Drizzle Studio
+- `npm run lint` — eslint
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## Deployment
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+Push to `main` → Vercel auto-deploys. Add the same env vars in Vercel Dashboard → Settings → Environment Variables.
 
-## Deploy on Vercel
+Before the first deploy, add the production URL to Supabase → Authentication → URL Configuration → Site URL (e.g., `https://trainer.vercel.app`). The Google OAuth redirect URI stays the same (`https://<project-ref>.supabase.co/auth/v1/callback`) — only the *app's* site URL needs to change per environment.
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+## Plans
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Implementation plans live in `docs/superpowers/plans/`. Specs live in `docs/superpowers/specs/`.

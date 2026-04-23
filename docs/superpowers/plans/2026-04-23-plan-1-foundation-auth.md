@@ -668,18 +668,20 @@ git commit -m "feat: add RLS policies and auto-profile trigger"
 
 ---
 
-## Task 9: Root middleware for auth gating
+## Task 9: Root proxy for auth gating
+
+> **Next.js 16 note:** What Next 15 called `middleware.ts` is now `proxy.ts`. The file lives at the repo root; the exported function must be named `proxy`. The `lib/supabase/middleware.ts` helper keeps its name (it's not the convention file; it just exports `updateSession`). The proxy runtime is Node.js only — do **not** set `export const runtime = 'edge'`.
 
 **Files:**
-- Create: `middleware.ts`
+- Create: `proxy.ts`
 
-- [ ] **Step 1: Write `middleware.ts`**
+- [ ] **Step 1: Write `proxy.ts`**
 
 ```ts
 import type { NextRequest } from "next/server";
 import { updateSession } from "@/lib/supabase/middleware";
 
-export async function middleware(request: NextRequest) {
+export async function proxy(request: NextRequest) {
   return updateSession(request);
 }
 
@@ -694,8 +696,8 @@ export const config = {
 - [ ] **Step 2: Commit**
 
 ```bash
-git add middleware.ts
-git commit -m "feat: add auth middleware — redirects unauthenticated users to /login"
+git add proxy.ts
+git commit -m "feat: add auth proxy — redirects unauthenticated users to /login"
 ```
 
 ---

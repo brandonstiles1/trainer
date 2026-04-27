@@ -1,10 +1,21 @@
 import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import { db } from "@/lib/db";
-import { workouts, workoutSets, profiles } from "@/lib/db/schema";
+import { workouts, workoutSets, profiles, plans } from "@/lib/db/schema";
 import { and, asc, eq } from "drizzle-orm";
 import { Session, type SessionSet } from "./session";
 import { Summary } from "@/components/workout/summary";
+import type { applyBranch } from "@/lib/branch";
+
+type Branches = Parameters<typeof applyBranch>[1];
+
+type PlanStructure = {
+  days: Array<{
+    day: string;
+    category: string;
+    exercises: Array<{ name: string; order: number }>;
+  }>;
+};
 
 export default async function WorkoutPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
@@ -23,10 +34,32 @@ export default async function WorkoutPage({ params }: { params: Promise<{ id: st
     .select()
     .from(workoutSets)
     .where(eq(workoutSets.workoutId, id))
-    .orderBy(asc(workoutSets.exerciseName), asc(workoutSets.setNumber));
+    .orderBy(asc(workoutSets.setNumber));
+
+  // Sort exercises by their order in the plan day (workoutSets has no exercise-order column).
+  const [plan] = await db
+    .select({ structure: plans.structure })
+    .from(plans)
+    .where(eq(plans.id, workout.planId))
+    .limit(1);
+  const planDay = (plan?.structure as PlanStructure | undefined)?.days.find(
+    (d) => d.category === workout.dayKey,
+  );
+  const exerciseOrder = new Map<string, number>();
+  if (planDay) {
+    for (const ex of planDay.exercises) {
+      exerciseOrder.set(ex.name, ex.order);
+    }
+  }
+  const sortedRows = [...rows].sort((a, b) => {
+    const ao = exerciseOrder.get(a.exerciseName) ?? 999;
+    const bo = exerciseOrder.get(b.exerciseName) ?? 999;
+    if (ao !== bo) return ao - bo;
+    return a.setNumber - b.setNumber;
+  });
 
   if (workout.status !== "in_progress") {
-    const summary = rows.map((r) => ({
+    const summary = sortedRows.map((r) => ({
       exerciseName: r.exerciseName,
       setNumber: r.setNumber,
       prescribed: r.prescribed as { reps: number; weight: number },
@@ -35,13 +68,13 @@ export default async function WorkoutPage({ params }: { params: Promise<{ id: st
     return <Summary sets={summary} />;
   }
 
-  const sets: SessionSet[] = rows.map((r) => {
-    const p = r.prescribed as { reps: number; weight: number };
+  const sets: SessionSet[] = sortedRows.map((r) => {
+    const p = r.prescribed as { reps: number; weight: number; branches: Branches };
     return {
       id: r.id,
       exerciseName: r.exerciseName,
       setNumber: r.setNumber,
-      prescribed: { reps: p.reps, weight: p.weight },
+      prescribed: { reps: p.reps, weight: p.weight, branches: p.branches },
       completed: r.completedAt !== null,
       actual: r.actual as SessionSet["actual"],
     };

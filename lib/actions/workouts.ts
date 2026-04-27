@@ -3,8 +3,9 @@
 import { createClient } from "@/lib/supabase/server";
 import { db } from "@/lib/db";
 import { plans, workouts, workoutSets } from "@/lib/db/schema";
-import { and, eq } from "drizzle-orm";
+import { and, asc, eq } from "drizzle-orm";
 import { workoutResponseSchema } from "@/lib/workout-tool";
+import { applyBranch, type Actual } from "@/lib/branch";
 
 type PlanStructure = {
   split: string;
@@ -137,4 +138,82 @@ async function generateWorkout(params: {
   const parsed = workoutResponseSchema.safeParse(toolUse.input);
   if (!parsed.success) throw new Error(`claude: schema failure: ${parsed.error.issues[0]?.message}`);
   return parsed.data;
+}
+
+export type CommitSetInput = {
+  workoutId: string;
+  setId: string;
+  actual: Actual;
+};
+
+export async function commitSet(input: CommitSetInput): Promise<void> {
+  const supabase = await createClient();
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) throw new Error("not signed in");
+
+  // Ownership check + load the set we're committing
+  const [row] = await db
+    .select({
+      setId: workoutSets.id,
+      workoutUserId: workouts.userId,
+      exerciseName: workoutSets.exerciseName,
+      setNumber: workoutSets.setNumber,
+      prescribed: workoutSets.prescribed,
+    })
+    .from(workoutSets)
+    .innerJoin(workouts, eq(workouts.id, workoutSets.workoutId))
+    .where(and(eq(workoutSets.id, input.setId), eq(workoutSets.workoutId, input.workoutId)))
+    .limit(1);
+  if (!row || row.workoutUserId !== user.id) throw new Error("set not found");
+
+  // Write actual + completed_at
+  await db
+    .update(workoutSets)
+    .set({ actual: input.actual, completedAt: new Date() })
+    .where(eq(workoutSets.id, input.setId));
+
+  // Apply branch logic to the NEXT set for this exercise (if one exists and isn't already completed).
+  const nextSets = await db
+    .select()
+    .from(workoutSets)
+    .where(and(eq(workoutSets.workoutId, input.workoutId), eq(workoutSets.exerciseName, row.exerciseName)))
+    .orderBy(asc(workoutSets.setNumber));
+  const next = nextSets.find((s) => s.setNumber > row.setNumber && s.completedAt === null);
+  if (next) {
+    const prescribed = row.prescribed as { reps: number; weight: number; branches: Parameters<typeof applyBranch>[1] };
+    const adjusted = applyBranch(input.actual, prescribed.branches);
+    const nextPrescribed = next.prescribed as { reps: number; weight: number; branches: unknown };
+    await db
+      .update(workoutSets)
+      .set({
+        prescribed: {
+          reps: adjusted.reps,
+          weight: adjusted.weight,
+          branches: nextPrescribed.branches,
+        },
+      })
+      .where(eq(workoutSets.id, next.id));
+  }
+}
+
+export async function completeWorkout(workoutId: string): Promise<void> {
+  const supabase = await createClient();
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) throw new Error("not signed in");
+
+  await db
+    .update(workouts)
+    .set({ status: "completed", completedAt: new Date() })
+    .where(and(eq(workouts.id, workoutId), eq(workouts.userId, user.id)));
+}
+
+export async function abandonWorkout(workoutId: string): Promise<void> {
+  const supabase = await createClient();
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) throw new Error("not signed in");
+
+  await db
+    .update(workouts)
+    .set({ status: "abandoned", completedAt: new Date() })
+    .where(and(eq(workouts.id, workoutId), eq(workouts.userId, user.id)));
 }

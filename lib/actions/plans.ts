@@ -5,6 +5,7 @@ import { db } from "@/lib/db";
 import { plans, goals } from "@/lib/db/schema";
 import { and, eq } from "drizzle-orm";
 import { extractPlan, type Plan } from "@/lib/plan-parser";
+import { adjustTodayWorkout } from "@/lib/actions/workouts";
 
 export type AcceptPlanInput = {
   goalId: string;
@@ -53,6 +54,13 @@ export async function acceptPlan(input: AcceptPlanInput): Promise<{ planId: stri
       activatedAt: new Date(),
     } as typeof plans.$inferInsert)
     .returning({ id: plans.id });
+
+  // Bring today's in-progress workout in line with the new plan, if any.
+  await adjustTodayWorkout({
+    userId: user.id,
+    newPlanId: row.id,
+    newStructure: parsed,
+  });
 
   return { planId: row.id };
 }

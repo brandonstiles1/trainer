@@ -3,9 +3,10 @@
 import { createClient } from "@/lib/supabase/server";
 import { db } from "@/lib/db";
 import { plans, workouts, workoutSets } from "@/lib/db/schema";
-import { and, asc, eq } from "drizzle-orm";
-import { workoutResponseSchema } from "@/lib/workout-tool";
+import { and, asc, eq, inArray } from "drizzle-orm";
+import { workoutResponseSchema, type WorkoutResponse } from "@/lib/workout-tool";
 import { applyBranch, type Actual } from "@/lib/branch";
+import { planTodayDiff } from "@/lib/workouts/plan-today-diff";
 
 type PlanStructure = {
   split: string;
@@ -80,8 +81,8 @@ export async function startWorkout(): Promise<
   return { workoutId: workoutRow.id };
 }
 
-// Local helper — calls Anthropic directly.
-async function generateWorkout(params: {
+// Calls Anthropic directly to design prescribed sets for a day's exercises.
+export async function generateWorkout(params: {
   userId: string;
   dayKey: string;
   exercises: string[];
@@ -216,4 +217,78 @@ export async function abandonWorkout(workoutId: string): Promise<void> {
     .update(workouts)
     .set({ status: "abandoned", completedAt: new Date() })
     .where(and(eq(workouts.id, workoutId), eq(workouts.userId, user.id)));
+}
+
+/**
+ * When a new plan becomes active, adjust today's in-progress workout to match it:
+ * exercises already started are left intact; everything not yet started is replaced
+ * with the new plan day's exercises. No-op if there's no in-progress workout or the
+ * new plan has no entry for today.
+ */
+export async function adjustTodayWorkout(params: {
+  userId: string;
+  newPlanId: string;
+  newStructure: PlanStructure;
+}): Promise<void> {
+  const { userId, newPlanId, newStructure } = params;
+
+  const [inProgress] = await db
+    .select()
+    .from(workouts)
+    .where(and(eq(workouts.userId, userId), eq(workouts.status, "in_progress")))
+    .limit(1);
+  if (!inProgress) return;
+
+  const today = weekdayForToday();
+  const planDay = newStructure.days.find((d) => d.day === today);
+  if (!planDay) return; // new plan makes today a rest day — leave the workout as-is
+
+  const newExercises = planDay.exercises
+    .slice()
+    .sort((a, b) => a.order - b.order)
+    .map((e) => e.name);
+
+  const existingSets = await db
+    .select({
+      id: workoutSets.id,
+      exerciseName: workoutSets.exerciseName,
+      completedAt: workoutSets.completedAt,
+    })
+    .from(workoutSets)
+    .where(eq(workoutSets.workoutId, inProgress.id));
+
+  const diff = planTodayDiff({ existingSets, newDayExercises: newExercises });
+
+  // Generate fresh prescribed sets for not-started exercises (Anthropic call,
+  // done BEFORE the destructive DB writes so a failure leaves the workout intact).
+  const generated: WorkoutResponse =
+    diff.exercisesToGenerate.length > 0
+      ? await generateWorkout({
+          userId,
+          dayKey: planDay.category,
+          exercises: diff.exercisesToGenerate,
+        })
+      : { exercises: [] };
+
+  const newSetRows = generated.exercises.flatMap((ex) =>
+    ex.sets.map((s) => ({
+      workoutId: inProgress.id,
+      exerciseName: ex.name,
+      setNumber: s.set_number,
+      prescribed: { reps: s.prescribed.reps, weight: s.prescribed.weight, branches: s.branches },
+    })),
+  );
+
+  await db.transaction(async (tx) => {
+    if (diff.setIdsToDelete.length > 0) {
+      await tx.delete(workoutSets).where(inArray(workoutSets.id, diff.setIdsToDelete));
+    }
+    if (newSetRows.length > 0) {
+      await tx.insert(workoutSets).values(newSetRows as (typeof workoutSets.$inferInsert)[]);
+    }
+    await tx
+      .update(workouts)
+      .set({ planId: newPlanId, dayKey: planDay.category })
+      .where(eq(workouts.id, inProgress.id));
+  });
 }

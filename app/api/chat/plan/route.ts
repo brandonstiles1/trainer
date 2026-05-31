@@ -3,12 +3,10 @@ import { anthropic, model } from "@/lib/anthropic";
 import { PLAN_DESIGN_SYSTEM } from "@/lib/prompts/plan-design";
 import { createSignedReadUrl } from "@/lib/storage";
 import { db } from "@/lib/db";
-import { goals } from "@/lib/db/schema";
-import { eq } from "drizzle-orm";
-import type {
-  MessageParam,
-  ContentBlockParam,
-} from "@anthropic-ai/sdk/resources/messages/messages";
+import { goals, plans } from "@/lib/db/schema";
+import { and, eq } from "drizzle-orm";
+import { assemblePlanMessages } from "@/lib/chat/assemble-plan-messages";
+import type { ContentBlockParam } from "@anthropic-ai/sdk/resources/messages/messages";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -17,6 +15,7 @@ type ChatMessage = { role: "user" | "assistant"; content: string };
 
 type Body = {
   goalId: string;
+  mode?: "new" | "edit"; // default "new"
   messages: ChatMessage[]; // transcript so far (excluding the system prompt)
 };
 
@@ -41,37 +40,62 @@ export async function POST(req: Request) {
     return new Response("goal not found", { status: 404 });
   }
 
-  // First turn: inject goal context (inputs + images) as the leading user message.
-  // Subsequent turns: just use the transcript.
-  const messages: MessageParam[] = [];
-  if (body.messages.length === 0) {
-    const content: ContentBlockParam[] = [];
+  const mode = body.mode ?? "new";
 
-    if (goal.beforePhotoPath) {
+  // Only build (and fetch) context when the conversation would otherwise begin
+  // with a user turn — i.e. there's nothing yet, or the first turn is the user's.
+  const willInject =
+    body.messages.length === 0 || body.messages[0].role === "user";
+
+  const contextBlocks: ContentBlockParam[] = [];
+  if (willInject) {
+    // Photos: only on the genuinely first injected turn to avoid re-sending them.
+    const firstInjectedTurn =
+      mode === "edit" ? body.messages.length <= 1 : body.messages.length === 0;
+
+    if (firstInjectedTurn && goal.beforePhotoPath) {
       const url = await createSignedReadUrl(goal.beforePhotoPath);
       const { data, mediaType } = await fetchImageAsBase64(url);
-      content.push({ type: "image", source: { type: "base64", media_type: mediaType as "image/jpeg", data } });
-      content.push({ type: "text", text: "Above: my current 'before' photo." });
+      contextBlocks.push({ type: "image", source: { type: "base64", media_type: mediaType as "image/jpeg", data } });
+      contextBlocks.push({ type: "text", text: "Above: my current 'before' photo." });
     }
-    if (goal.goalPhotoPath) {
+    if (firstInjectedTurn && goal.goalPhotoPath) {
       const url = await createSignedReadUrl(goal.goalPhotoPath);
       const { data, mediaType } = await fetchImageAsBase64(url);
-      content.push({ type: "image", source: { type: "base64", media_type: mediaType as "image/jpeg", data } });
-      content.push({ type: "text", text: "Above: my goal photo." });
+      contextBlocks.push({ type: "image", source: { type: "base64", media_type: mediaType as "image/jpeg", data } });
+      contextBlocks.push({ type: "text", text: "Above: my goal photo." });
     }
-    const intro =
-      `Please design a weekly strength program. ` +
-      (goal.goalDescription ? `My goal: ${goal.goalDescription}. ` : "") +
-      `I can train up to ${goal.maxDaysPerWeek} days/week, ${goal.maxMinutesSession} min/session. ` +
-      `Propose a plan including specific exercises per day.`;
-    content.push({ type: "text", text: intro });
 
-    messages.push({ role: "user", content });
-  } else {
-    for (const m of body.messages) {
-      messages.push({ role: m.role, content: m.content });
+    if (mode === "edit") {
+      const [activePlan] = await db
+        .select()
+        .from(plans)
+        .where(and(eq(plans.userId, user.id), eq(plans.isActive, true)))
+        .limit(1);
+      const planJson = activePlan ? JSON.stringify(activePlan.structure) : "{}";
+      contextBlocks.push({
+        type: "text",
+        text:
+          `Here is my current active plan as JSON:\n${planJson}\n\n` +
+          `I want to adjust it. Read my requested change below, then return a revised ` +
+          `<plan> block reflecting that change while keeping everything else stable.`,
+      });
+    } else {
+      contextBlocks.push({
+        type: "text",
+        text:
+          `Please design a weekly strength program. ` +
+          (goal.goalDescription ? `My goal: ${goal.goalDescription}. ` : "") +
+          `I can train up to ${goal.maxDaysPerWeek} days/week, ${goal.maxMinutesSession} min/session. ` +
+          `Propose a plan including specific exercises per day.`,
+      });
     }
   }
+
+  const messages = assemblePlanMessages({
+    contextBlocks,
+    transcript: body.messages,
+  });
 
   const encoder = new TextEncoder();
   const stream = new ReadableStream({

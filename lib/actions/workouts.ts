@@ -7,6 +7,7 @@ import { and, asc, eq, inArray } from "drizzle-orm";
 import { workoutResponseSchema, type WorkoutResponse } from "@/lib/workout-tool";
 import { applyBranch, type Actual } from "@/lib/branch";
 import { planTodayDiff } from "@/lib/workouts/plan-today-diff";
+import { findPlanDay } from "@/lib/workouts/find-plan-day";
 
 type PlanStructure = {
   split: string;
@@ -46,8 +47,7 @@ export async function startWorkout(): Promise<
   if (!activePlan) throw new Error("no active plan");
 
   const structure = activePlan.structure as PlanStructure;
-  const today = weekdayForToday();
-  const planDay = structure.days.find((d) => d.day === today);
+  const planDay = findPlanDay(structure, weekdayForToday());
   if (!planDay) return { restDay: true, category: null };
 
   const exerciseNames = planDay.exercises
@@ -55,15 +55,33 @@ export async function startWorkout(): Promise<
     .sort((a, b) => a.order - b.order)
     .map((e) => e.name);
 
-  const generated = await generateWorkout({ userId: user.id, dayKey: planDay.category, exercises: exerciseNames });
+  return createWorkout({
+    userId: user.id,
+    planId: activePlan.id,
+    category: planDay.category,
+    exercises: exerciseNames,
+  });
+}
 
-  // Transaction: insert workout row + all prescribed set rows
+// Generates prescribed sets via Claude and inserts the workout + its set rows.
+async function createWorkout(params: {
+  userId: string;
+  planId: string;
+  category: string;     // stored as workouts.dayKey
+  exercises: string[];  // ordered exercise names
+}): Promise<{ workoutId: string }> {
+  const generated = await generateWorkout({
+    userId: params.userId,
+    dayKey: params.category,
+    exercises: params.exercises,
+  });
+
   const [workoutRow] = await db
     .insert(workouts)
     .values({
-      userId: user.id,
-      planId: activePlan.id,
-      dayKey: planDay.category,
+      userId: params.userId,
+      planId: params.planId,
+      dayKey: params.category,
       status: "in_progress",
     } as typeof workouts.$inferInsert)
     .returning({ id: workouts.id });
@@ -79,6 +97,45 @@ export async function startWorkout(): Promise<
   await db.insert(workoutSets).values(setRows as (typeof workoutSets.$inferInsert)[]);
 
   return { workoutId: workoutRow.id };
+}
+
+export async function startImpromptuWorkout(
+  sourceDay: string,
+): Promise<{ workoutId: string }> {
+  const supabase = await createClient();
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) throw new Error("not signed in");
+
+  // Resume an in_progress workout if one exists (one active workout at a time).
+  const [inProgress] = await db
+    .select()
+    .from(workouts)
+    .where(and(eq(workouts.userId, user.id), eq(workouts.status, "in_progress")))
+    .limit(1);
+  if (inProgress) return { workoutId: inProgress.id };
+
+  const [activePlan] = await db
+    .select()
+    .from(plans)
+    .where(and(eq(plans.userId, user.id), eq(plans.isActive, true)))
+    .limit(1);
+  if (!activePlan) throw new Error("no active plan");
+
+  const structure = activePlan.structure as PlanStructure;
+  const planDay = findPlanDay(structure, sourceDay);
+  if (!planDay) throw new Error("plan day not found");
+
+  const exerciseNames = planDay.exercises
+    .slice()
+    .sort((a, b) => a.order - b.order)
+    .map((e) => e.name);
+
+  return createWorkout({
+    userId: user.id,
+    planId: activePlan.id,
+    category: planDay.category,
+    exercises: exerciseNames,
+  });
 }
 
 // Calls Anthropic directly to design prescribed sets for a day's exercises.

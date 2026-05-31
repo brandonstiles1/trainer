@@ -2,33 +2,37 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { Flame, LineChart, CalendarDays, Settings, type LucideIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
 
-const TABS = [
-  { href: "/today", label: "Today" },
-  { href: "/progress", label: "Progress" },
-  { href: "/plan", label: "Plan" },
-  { href: "/settings", label: "Settings" },
-] as const;
+const TABS: { href: string; label: string; Icon: LucideIcon }[] = [
+  { href: "/today", label: "Today", Icon: Flame },
+  { href: "/progress", label: "Progress", Icon: LineChart },
+  { href: "/plan", label: "Plan", Icon: CalendarDays },
+  { href: "/settings", label: "Settings", Icon: Settings },
+];
 
 export function BottomNav() {
   const pathname = usePathname();
 
   return (
-    <nav className="fixed bottom-0 left-0 right-0 border-t bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 z-50">
-      <ul className="grid grid-cols-4 h-16">
-        {TABS.map((tab) => {
-          const active = pathname.startsWith(tab.href);
+    <nav className="fixed bottom-0 left-0 right-0 border-t border-[color:var(--hairline)] bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/70 z-50">
+      <ul className="grid grid-cols-4 h-16 max-w-md mx-auto">
+        {TABS.map(({ href, label, Icon }) => {
+          const active = pathname.startsWith(href);
           return (
-            <li key={tab.href}>
+            <li key={href}>
               <Link
-                href={tab.href}
+                href={href}
                 className={cn(
-                  "flex h-full items-center justify-center text-sm font-medium transition-colors",
-                  active ? "text-foreground" : "text-muted-foreground hover:text-foreground",
+                  "flex h-full flex-col items-center justify-center gap-1 text-[11px] transition-colors",
+                  active
+                    ? "text-[var(--teal)] font-medium"
+                    : "text-muted-foreground font-normal hover:text-foreground",
                 )}
               >
-                {tab.label}
+                <Icon className="size-5" strokeWidth={active ? 2 : 1.75} />
+                {label}
               </Link>
             </li>
           );

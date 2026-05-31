@@ -1,7 +1,15 @@
 import type { Metadata, Viewport } from "next";
 import { headers } from "next/headers";
+import { Hanken_Grotesk } from "next/font/google";
 import { BottomNav } from "@/components/bottom-nav";
 import "./globals.css";
+
+const sans = Hanken_Grotesk({
+  subsets: ["latin"],
+  weight: ["400", "500"],
+  variable: "--font-sans",
+  display: "swap",
+});
 
 export const metadata: Metadata = {
   title: "Trainer",
@@ -27,7 +35,7 @@ export default async function RootLayout({
   const hideNav = pathname.startsWith("/login") || pathname.startsWith("/auth");
 
   return (
-    <html lang="en">
+    <html lang="en" className={sans.variable}>
       <body className="antialiased pb-16">
         <div className="min-h-dvh">{children}</div>
         {!hideNav && <BottomNav />}

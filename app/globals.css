@@ -81,6 +81,20 @@
   --sidebar-accent-foreground: oklch(0.205 0 0);
   --sidebar-border: oklch(0.922 0 0);
   --sidebar-ring: oklch(0.708 0 0);
+
+  /* ── Deep Teal theme ── */
+  --teal: #04342c;
+  --teal-foreground: #ffffff;
+  --surface: #f7f7f5; /* off-white page behind white cards */
+  --hairline: rgba(0, 0, 0, 0.1); /* 0.5px borders */
+
+  /* set-feel chips */
+  --feel-hard-bg: #fbeae8;
+  --feel-hard-fg: #b23a36;
+  --feel-hard-border: #f0cbc6;
+  --feel-okay-bg: #fbf3da;
+  --feel-okay-fg: #927421;
+  --feel-okay-border: #ecdca6;
 }
 
 .dark {

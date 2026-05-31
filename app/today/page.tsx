@@ -4,6 +4,7 @@ import { db } from "@/lib/db";
 import { plans, workouts } from "@/lib/db/schema";
 import { and, eq } from "drizzle-orm";
 import { StartWorkoutButton } from "./start-workout-button";
+import { ImpromptuBox } from "./impromptu-box";
 
 type PlanStructure = {
   split: string;
@@ -75,6 +76,8 @@ export default async function TodayPage() {
           </p>
         </section>
       )}
+
+      <ImpromptuBox days={structure.days} />
     </main>
   );
 }

@@ -6,6 +6,11 @@ import { and, eq } from "drizzle-orm";
 import { StartWorkoutButton } from "./start-workout-button";
 import { ImpromptuBox } from "./impromptu-box";
 
+// Server actions on this page (startWorkout / startImpromptuWorkout) call Claude
+// to design the workout, which can take well over the default 10s function limit.
+// Page-level maxDuration sets the timeout for all Server Actions used on the page.
+export const maxDuration = 60;
+
 type PlanStructure = {
   split: string;
   days: Array<{

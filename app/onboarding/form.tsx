@@ -9,6 +9,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { PhotoUpload } from "@/components/photo-upload";
 import { submitOnboarding, getUploadUrl } from "./actions";
 import type { PhotoKind } from "@/lib/storage";
+import { feetInchesToInches } from "@/lib/height";
 
 function extFor(file: File): "jpg" | "jpeg" | "png" | "webp" | "heic" {
   const map: Record<string, "jpg" | "jpeg" | "png" | "webp" | "heic"> = {
@@ -35,7 +36,8 @@ export function OnboardingForm() {
   const [beforePhoto, setBeforePhoto] = useState<File | null>(null);
   const [goalPhoto, setGoalPhoto] = useState<File | null>(null);
   const [goalDescription, setGoalDescription] = useState("");
-  const [heightIn, setHeightIn] = useState(69);
+  const [heightFeet, setHeightFeet] = useState(5);
+  const [heightInches, setHeightInches] = useState(9);
   const [weightLbs, setWeightLbs] = useState(180);
   const [daysPerWeek, setDaysPerWeek] = useState(3);
   const [minutesSession, setMinutesSession] = useState(60);
@@ -59,7 +61,7 @@ export function OnboardingForm() {
 
       startTransition(() => {
         submitOnboarding({
-          heightIn,
+          heightIn: feetInchesToInches(heightFeet, heightInches),
           weightLbs,
           maxDaysPerWeek: daysPerWeek,
           maxMinutesSession: minutesSession,
@@ -82,29 +84,50 @@ export function OnboardingForm() {
         onError={setError}
       />
 
-      <div className="grid grid-cols-2 gap-4">
-        <div className="space-y-2">
-          <Label htmlFor="height">Height (in)</Label>
-          <Input
-            id="height"
-            type="number"
-            min={48}
-            max={96}
-            value={heightIn}
-            onChange={(e) => setHeightIn(Number(e.target.value))}
-          />
+      <div className="space-y-2">
+        <Label>Height</Label>
+        <div className="flex items-center gap-3">
+          <div className="flex items-center gap-1.5">
+            <Input
+              aria-label="Height (feet)"
+              type="number"
+              inputMode="numeric"
+              min={3}
+              max={8}
+              value={heightFeet}
+              onChange={(e) => setHeightFeet(Number(e.target.value))}
+              onFocus={(e) => e.target.select()}
+              className="w-20"
+            />
+            <span className="text-sm text-muted-foreground">ft</span>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <Input
+              aria-label="Height (inches)"
+              type="number"
+              inputMode="numeric"
+              min={0}
+              max={11}
+              value={heightInches}
+              onChange={(e) => setHeightInches(Number(e.target.value))}
+              onFocus={(e) => e.target.select()}
+              className="w-20"
+            />
+            <span className="text-sm text-muted-foreground">in</span>
+          </div>
         </div>
-        <div className="space-y-2">
-          <Label htmlFor="weight">Weight (lbs)</Label>
-          <Input
-            id="weight"
-            type="number"
-            min={80}
-            max={500}
-            value={weightLbs}
-            onChange={(e) => setWeightLbs(Number(e.target.value))}
-          />
-        </div>
+      </div>
+
+      <div className="space-y-2">
+        <Label htmlFor="weight">Weight (lbs)</Label>
+        <Input
+          id="weight"
+          type="number"
+          min={80}
+          max={500}
+          value={weightLbs}
+          onChange={(e) => setWeightLbs(Number(e.target.value))}
+        />
       </div>
 
       <div className="space-y-2">

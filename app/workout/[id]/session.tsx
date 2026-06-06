@@ -1,9 +1,8 @@
 "use client";
 
-import { useEffect, useMemo, useState, useTransition } from "react";
+import { useCallback, useEffect, useMemo, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
-import { ChevronDown, MoreHorizontal, Check, Clock } from "lucide-react";
-import { RestTimer } from "@/components/workout/rest-timer";
+import { ChevronDown, MoreHorizontal, Check, Clock, Timer } from "lucide-react";
 import { commitSet, completeWorkout, abandonWorkout } from "./actions";
 import { applyBranch, type Feeling } from "@/lib/branch";
 import { formatDuration } from "@/lib/format";
@@ -48,6 +47,104 @@ function useElapsed(startMs: number) {
   return Math.max(0, Math.floor((now - startMs) / 1000));
 }
 
+type RestState = { endsAt: number; durationMs: number };
+
+/** Rest timer driven by an absolute end timestamp and persisted to
+ *  localStorage. Survives re-render, navigation away/back, full reload and
+ *  phone lock — on return we recompute remaining from the clock, not a counter. */
+function useRestTimer(workoutId: string) {
+  const storageKey = `trainer:rest:${workoutId}`;
+  const [rest, setRest] = useState<RestState | null>(null);
+  const [now, setNow] = useState(0);
+
+  const persist = useCallback(
+    (r: RestState | null) => {
+      try {
+        if (r) localStorage.setItem(storageKey, JSON.stringify(r));
+        else localStorage.removeItem(storageKey);
+      } catch {
+        /* storage unavailable — timer still works in-memory */
+      }
+    },
+    [storageKey],
+  );
+
+  // Resume an in-flight rest after reload/navigation. Deferred to a timer
+  // callback so the read happens post-mount (hydration-safe) without a
+  // synchronous setState in the effect body.
+  useEffect(() => {
+    const resume = () => {
+      try {
+        const raw = localStorage.getItem(storageKey);
+        if (!raw) return;
+        const r = JSON.parse(raw) as RestState;
+        if (r && typeof r.endsAt === "number" && r.endsAt > Date.now()) setRest(r);
+        else localStorage.removeItem(storageKey);
+      } catch {
+        /* ignore */
+      }
+    };
+    const id = setTimeout(resume, 0);
+    return () => clearTimeout(id);
+  }, [storageKey]);
+
+  // Tick while active; clear when it elapses.
+  useEffect(() => {
+    if (!rest) return;
+    const tick = () => {
+      const t = Date.now();
+      setNow(t);
+      if (t >= rest.endsAt) {
+        setRest(null);
+        persist(null);
+      }
+    };
+    tick();
+    const id = setInterval(tick, 250);
+    return () => clearInterval(id);
+  }, [rest, persist]);
+
+  const remainingMs = rest ? Math.max(0, rest.endsAt - now) : 0;
+
+  const start = useCallback(
+    (seconds: number) => {
+      const r = { endsAt: Date.now() + seconds * 1000, durationMs: seconds * 1000 };
+      setRest(r);
+      persist(r);
+    },
+    [persist],
+  );
+
+  const extend = useCallback(
+    (seconds: number) => {
+      setRest((prev) => {
+        const base = prev ?? { endsAt: Date.now(), durationMs: 0 };
+        const r = {
+          endsAt: base.endsAt + seconds * 1000,
+          durationMs: base.durationMs + seconds * 1000,
+        };
+        persist(r);
+        return r;
+      });
+    },
+    [persist],
+  );
+
+  const skip = useCallback(() => {
+    setRest(null);
+    persist(null);
+  }, [persist]);
+
+  return {
+    active: !!rest,
+    remainingMs,
+    durationMs: rest?.durationMs ?? 0,
+    start,
+    extend,
+    skip,
+  };
+}
+
 export function Session({
   workoutId,
   dayName,
@@ -66,7 +163,6 @@ export function Session({
   const [activeSetId, setActiveSetId] = useState<string | null>(
     () => initialSets.find((s) => !s.completed)?.id ?? null,
   );
-  const [restingSetId, setRestingSetId] = useState<string | null>(null);
   const [calculatingSetId, setCalculatingSetId] = useState<string | null>(null);
   // Manual collapse/expand, independent of which set is active. Start with the
   // current exercise open.
@@ -77,6 +173,7 @@ export function Session({
   const [pending, startTransition] = useTransition();
 
   const elapsed = useElapsed(startedAtMs);
+  const rest = useRestTimer(workoutId);
 
   const completedCount = sets.filter((s) => s.completed).length;
   const allDone = completedCount === sets.length;
@@ -132,29 +229,30 @@ export function Session({
     // Show the "calculating" beat: clear the active form, surface the loader.
     setSets(updated);
     setActiveSetId(null);
-    setRestingSetId(null);
     setCalculatingSetId(setId);
 
     const minDelay = new Promise<void>((r) => setTimeout(r, CALCULATING_MS));
     await Promise.all([commitSet({ workoutId, setId, actual }), minDelay]);
 
     setCalculatingSetId(null);
-    setRestingSetId(setId);
     setActiveSetId(nextActive?.id ?? null);
     if (nextActive) {
       setExpanded((prev) =>
         prev.has(nextActive.exerciseName) ? prev : new Set(prev).add(nextActive.exerciseName),
       );
+      rest.start(restSeconds);
     }
   }
 
   async function handleFinish() {
+    rest.skip();
     await completeWorkout(workoutId);
     startTransition(() => router.refresh());
   }
 
   async function handleAbandon() {
     if (!confirm("Abandon this workout? Your progress so far is kept.")) return;
+    rest.skip();
     await abandonWorkout(workoutId);
     router.push("/today");
   }
@@ -184,13 +282,22 @@ export function Session({
             </div>
           </div>
 
-          <div className="mt-2.5 flex items-center gap-3.5">
-            <Stat label="Exercises" value={String(byExercise.length)} />
-            <span className="h-3 w-px bg-white/20" />
-            <Stat label="Sets" value={`${completedCount}/${sets.length}`} />
-            <span className="h-3 w-px bg-white/20" />
-            <Stat label="Volume" value={formatVolume(volume)} />
-          </div>
+          {rest.active ? (
+            <NavRestTimer
+              remainingMs={rest.remainingMs}
+              durationMs={rest.durationMs}
+              onExtend={() => rest.extend(30)}
+              onSkip={rest.skip}
+            />
+          ) : (
+            <div className="mt-2.5 flex items-center gap-3.5">
+              <Stat label="Exercises" value={String(byExercise.length)} />
+              <span className="h-3 w-px bg-white/20" />
+              <Stat label="Sets" value={`${completedCount}/${sets.length}`} />
+              <span className="h-3 w-px bg-white/20" />
+              <Stat label="Volume" value={formatVolume(volume)} />
+            </div>
+          )}
         </header>
 
         {/* ── Exercise cards ── */}
@@ -233,13 +340,6 @@ export function Session({
                       if (s.id === calculatingSetId) {
                         return <CalculatingNext key={s.id} />;
                       }
-                      if (s.id === restingSetId) {
-                        return (
-                          <div key={s.id} className="px-4 py-4">
-                            <RestTimer seconds={restSeconds} onDone={() => setRestingSetId(null)} />
-                          </div>
-                        );
-                      }
                       return <CompactSetRow key={s.id} set={s} divider={!last} />;
                     })}
                   </div>
@@ -271,6 +371,49 @@ function Stat({ label, value }: { label: string; value: string }) {
     <div className="flex items-baseline gap-1.5">
       <span className="text-base font-medium tabular-nums text-white">{value}</span>
       <span className="text-[11px] uppercase tracking-wide text-white/55">{label}</span>
+    </div>
+  );
+}
+
+function NavRestTimer({
+  remainingMs,
+  durationMs,
+  onExtend,
+  onSkip,
+}: {
+  remainingMs: number;
+  durationMs: number;
+  onExtend: () => void;
+  onSkip: () => void;
+}) {
+  const pct = durationMs > 0 ? Math.min(100, (remainingMs / durationMs) * 100) : 0;
+  const btn =
+    "rounded-full bg-white/15 px-2.5 py-1 text-[11px] font-medium text-white transition-colors hover:bg-white/25";
+  return (
+    <div className="mt-2.5 rounded-[12px] border-[0.5px] border-white/15 bg-white/10 px-3 py-2">
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-2">
+          <Timer className="size-3.5 text-white/60" />
+          <span className="text-[11px] font-medium uppercase tracking-wide text-white/65">Rest</span>
+          <span className="text-base font-medium tabular-nums text-white">
+            {formatDuration(Math.ceil(remainingMs / 1000))}
+          </span>
+        </div>
+        <div className="flex items-center gap-1.5">
+          <button type="button" onClick={onExtend} className={btn}>
+            +30s
+          </button>
+          <button type="button" onClick={onSkip} className={btn}>
+            Skip
+          </button>
+        </div>
+      </div>
+      <div className="mt-2 h-1 overflow-hidden rounded-full bg-white/15">
+        <div
+          className="h-full rounded-full bg-white transition-[width] duration-300 ease-linear"
+          style={{ width: `${pct}%` }}
+        />
+      </div>
     </div>
   );
 }

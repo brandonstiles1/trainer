@@ -1,11 +1,12 @@
 "use client";
 
-import { useMemo, useState, useTransition } from "react";
+import { useEffect, useMemo, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
-import { Dumbbell, ChevronDown, MoreHorizontal, Check } from "lucide-react";
+import { ChevronDown, MoreHorizontal, Check, Clock } from "lucide-react";
 import { RestTimer } from "@/components/workout/rest-timer";
 import { commitSet, completeWorkout, abandonWorkout } from "./actions";
 import { applyBranch, type Feeling } from "@/lib/branch";
+import { formatDuration } from "@/lib/format";
 
 type Branches = Parameters<typeof applyBranch>[1];
 
@@ -20,6 +21,9 @@ export type SessionSet = {
 
 type Actual = { reps: number; weight: number; feeling: Feeling };
 
+// Feels like the app is "computing" the next set even though applyBranch is instant.
+const CALCULATING_MS = 850;
+
 const titleCase = (s: string) =>
   s.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 
@@ -32,16 +36,30 @@ const feelColor: Record<Feeling, string> = {
   green: "var(--teal)",
 };
 
+// Timestamp-based so it stays correct across re-renders, navigation and lock/unlock.
+function useElapsed(startMs: number) {
+  const [now, setNow] = useState(startMs);
+  useEffect(() => {
+    const tick = () => setNow(Date.now());
+    tick();
+    const id = setInterval(tick, 1000);
+    return () => clearInterval(id);
+  }, []);
+  return Math.max(0, Math.floor((now - startMs) / 1000));
+}
+
 export function Session({
   workoutId,
   dayName,
   initialSets,
   restSeconds,
+  startedAtMs,
 }: {
   workoutId: string;
   dayName: string;
   initialSets: SessionSet[];
   restSeconds: number;
+  startedAtMs: number;
 }) {
   const router = useRouter();
   const [sets, setSets] = useState(initialSets);
@@ -49,7 +67,16 @@ export function Session({
     () => initialSets.find((s) => !s.completed)?.id ?? null,
   );
   const [restingSetId, setRestingSetId] = useState<string | null>(null);
+  const [calculatingSetId, setCalculatingSetId] = useState<string | null>(null);
+  // Manual collapse/expand, independent of which set is active. Start with the
+  // current exercise open.
+  const [expanded, setExpanded] = useState<Set<string>>(() => {
+    const name = initialSets.find((s) => !s.completed)?.exerciseName;
+    return new Set(name ? [name] : []);
+  });
   const [pending, startTransition] = useTransition();
+
+  const elapsed = useElapsed(startedAtMs);
 
   const completedCount = sets.filter((s) => s.completed).length;
   const allDone = completedCount === sets.length;
@@ -71,6 +98,15 @@ export function Session({
     return order.map((name) => [name, map.get(name)!] as const);
   }, [sets]);
 
+  function toggleExpanded(name: string) {
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(name)) next.delete(name);
+      else next.add(name);
+      return next;
+    });
+  }
+
   async function handleCommit(setId: string, actual: Actual) {
     const idx = sets.findIndex((s) => s.id === setId);
     if (idx === -1) return;
@@ -91,19 +127,25 @@ export function Session({
           : s,
       );
     }
-    setSets(updated);
-    setRestingSetId(setId);
-
     const nextActive = next ?? updated.find((s) => !s.completed && s.id !== setId) ?? null;
-    setActiveSetId(nextActive?.id ?? null);
 
-    await commitSet({ workoutId, setId, actual });
-  }
-
-  function activateExercise(exerciseSets: SessionSet[]) {
-    const target = exerciseSets.find((s) => !s.completed) ?? exerciseSets[0];
+    // Show the "calculating" beat: clear the active form, surface the loader.
+    setSets(updated);
+    setActiveSetId(null);
     setRestingSetId(null);
-    setActiveSetId(target.id);
+    setCalculatingSetId(setId);
+
+    const minDelay = new Promise<void>((r) => setTimeout(r, CALCULATING_MS));
+    await Promise.all([commitSet({ workoutId, setId, actual }), minDelay]);
+
+    setCalculatingSetId(null);
+    setRestingSetId(setId);
+    setActiveSetId(nextActive?.id ?? null);
+    if (nextActive) {
+      setExpanded((prev) =>
+        prev.has(nextActive.exerciseName) ? prev : new Set(prev).add(nextActive.exerciseName),
+      );
+    }
   }
 
   async function handleFinish() {
@@ -120,27 +162,34 @@ export function Session({
   return (
     <div className="min-h-dvh bg-[var(--surface)]">
       <div className="max-w-md mx-auto">
-        {/* ── Sticky deep-teal header ── */}
-        <header className="sticky top-0 z-30 bg-[var(--teal)] text-white px-5 pt-5 pb-4 rounded-b-[20px]">
-          <div className="flex items-start justify-between">
-            <p className="text-xs font-medium uppercase tracking-[0.12em] text-white/70">
+        {/* ── Compact sticky deep-teal header ── */}
+        <header className="sticky top-0 z-30 bg-[var(--teal)] text-white px-5 pt-3 pb-3 rounded-b-[18px]">
+          <div className="flex items-center justify-between gap-3">
+            <p className="truncate text-xs font-medium uppercase tracking-[0.12em] text-white/70">
               {titleCase(dayName)} day
             </p>
-            <button
-              type="button"
-              onClick={handleAbandon}
-              aria-label="Workout options"
-              className="-mt-1 -mr-1 p-1 text-white/60 hover:text-white transition-colors"
-            >
-              <MoreHorizontal className="size-5" />
-            </button>
+            <div className="flex items-center gap-3">
+              <span className="flex items-center gap-1.5 text-sm font-medium tabular-nums text-white">
+                <Clock className="size-3.5 text-white/55" />
+                {formatDuration(elapsed)}
+              </span>
+              <button
+                type="button"
+                onClick={handleAbandon}
+                aria-label="Workout options"
+                className="-mr-1 p-1 text-white/60 hover:text-white transition-colors"
+              >
+                <MoreHorizontal className="size-5" />
+              </button>
+            </div>
           </div>
-          <h1 className="mt-1 text-2xl font-medium tracking-tight">Today&apos;s workout</h1>
 
-          <div className="mt-4 grid grid-cols-3 gap-2">
-            <StatTile label="Exercises" value={String(byExercise.length)} />
-            <StatTile label="Sets" value={`${completedCount}/${sets.length}`} />
-            <StatTile label="Volume" value={formatVolume(volume)} />
+          <div className="mt-2.5 flex items-center gap-3.5">
+            <Stat label="Exercises" value={String(byExercise.length)} />
+            <span className="h-3 w-px bg-white/20" />
+            <Stat label="Sets" value={`${completedCount}/${sets.length}`} />
+            <span className="h-3 w-px bg-white/20" />
+            <Stat label="Volume" value={formatVolume(volume)} />
           </div>
         </header>
 
@@ -149,9 +198,8 @@ export function Session({
           {byExercise.map(([exerciseName, exerciseSets]) => {
             const done = exerciseSets.filter((s) => s.completed).length;
             const total = exerciseSets.length;
-            const expanded = exerciseSets.some(
-              (s) => s.id === activeSetId || s.id === restingSetId,
-            );
+            const isExpanded = expanded.has(exerciseName);
+            const isActive = exerciseSets.some((s) => s.id === activeSetId);
             const lead = exerciseSets.find((s) => !s.completed) ?? exerciseSets[0];
 
             return (
@@ -164,11 +212,12 @@ export function Session({
                   done={done}
                   total={total}
                   lead={lead}
-                  expanded={expanded}
-                  onTap={expanded ? undefined : () => activateExercise(exerciseSets)}
+                  expanded={isExpanded}
+                  isActive={isActive}
+                  onTap={() => toggleExpanded(exerciseName)}
                 />
 
-                {expanded && (
+                {isExpanded && (
                   <div className="border-t border-[color:var(--hairline)]">
                     {exerciseSets.map((s, i) => {
                       const last = i === exerciseSets.length - 1;
@@ -181,6 +230,9 @@ export function Session({
                           />
                         );
                       }
+                      if (s.id === calculatingSetId) {
+                        return <CalculatingNext key={s.id} />;
+                      }
                       if (s.id === restingSetId) {
                         return (
                           <div key={s.id} className="px-4 py-4">
@@ -188,17 +240,7 @@ export function Session({
                           </div>
                         );
                       }
-                      return (
-                        <CompactSetRow
-                          key={s.id}
-                          set={s}
-                          divider={!last}
-                          onTap={() => {
-                            setRestingSetId(null);
-                            setActiveSetId(s.id);
-                          }}
-                        />
-                      );
+                      return <CompactSetRow key={s.id} set={s} divider={!last} />;
                     })}
                   </div>
                 )}
@@ -224,11 +266,11 @@ export function Session({
   );
 }
 
-function StatTile({ label, value }: { label: string; value: string }) {
+function Stat({ label, value }: { label: string; value: string }) {
   return (
-    <div className="rounded-[12px] border-[0.5px] border-white/15 bg-white/10 px-3 py-2.5">
-      <p className="text-[11px] font-normal uppercase tracking-wide text-white/55">{label}</p>
-      <p className="mt-0.5 text-xl font-medium tabular-nums text-white">{value}</p>
+    <div className="flex items-baseline gap-1.5">
+      <span className="text-base font-medium tabular-nums text-white">{value}</span>
+      <span className="text-[11px] uppercase tracking-wide text-white/55">{label}</span>
     </div>
   );
 }
@@ -239,6 +281,7 @@ function ExerciseHeader({
   total,
   lead,
   expanded,
+  isActive,
   onTap,
 }: {
   name: string;
@@ -246,52 +289,53 @@ function ExerciseHeader({
   total: number;
   lead: SessionSet;
   expanded: boolean;
-  onTap?: () => void;
-}) {
-  const inner = (
-    <>
-      <div>
-        <h2 className="text-base font-medium text-foreground">{titleCase(name)}</h2>
-        <p className="mt-0.5 text-xs font-normal text-muted-foreground tabular-nums">
-          {done} of {total} sets · {lead.prescribed.reps} × {lead.prescribed.weight} lbs
-        </p>
-      </div>
-      {expanded ? (
-        <span className="flex size-9 shrink-0 items-center justify-center rounded-full bg-[var(--teal)]/10 text-[var(--teal)]">
-          <Dumbbell className="size-4" />
-        </span>
-      ) : (
-        <ChevronDown className="size-5 shrink-0 text-muted-foreground" />
-      )}
-    </>
-  );
-
-  const cls = "w-full flex items-center justify-between gap-3 px-4 py-3.5 text-left";
-  return onTap ? (
-    <button type="button" onClick={onTap} className={cls}>
-      {inner}
-    </button>
-  ) : (
-    <div className={cls}>{inner}</div>
-  );
-}
-
-function CompactSetRow({
-  set,
-  divider,
-  onTap,
-}: {
-  set: SessionSet;
-  divider: boolean;
+  isActive: boolean;
   onTap: () => void;
 }) {
-  const done = set.completed && set.actual;
   return (
     <button
       type="button"
       onClick={onTap}
-      title={set.completed ? "Tap to re-edit" : "Tap to make active"}
-      className={`w-full flex items-center justify-between px-4 py-3 text-sm hover:bg-black/[0.02] ${
+      aria-expanded={expanded}
+      className="w-full flex items-center justify-between gap-3 px-4 py-3 text-left"
+    >
+      <div className="min-w-0">
+        <h2 className="flex items-center gap-2 text-base font-medium text-foreground">
+          {isActive && (
+            <span aria-hidden className="size-1.5 shrink-0 rounded-full bg-[var(--teal)]" />
+          )}
+          <span className="truncate">{titleCase(name)}</span>
+        </h2>
+        <p className="mt-0.5 text-xs font-normal text-muted-foreground tabular-nums">
+          {done} of {total} sets · {lead.prescribed.reps} × {lead.prescribed.weight} lbs
+        </p>
+      </div>
+      <ChevronDown
+        className={`size-5 shrink-0 text-muted-foreground transition-transform ${
+          expanded ? "rotate-180" : ""
+        }`}
+      />
+    </button>
+  );
+}
+
+function CalculatingNext() {
+  return (
+    <div className="flex items-center justify-center gap-2.5 px-4 py-6 text-sm font-normal text-muted-foreground">
+      <span
+        aria-hidden
+        className="size-4 animate-spin rounded-full border-2 border-[var(--teal)]/25 border-t-[var(--teal)]"
+      />
+      Calculating next set…
+    </div>
+  );
+}
+
+function CompactSetRow({ set, divider }: { set: SessionSet; divider: boolean }) {
+  const done = set.completed && set.actual;
+  return (
+    <div
+      className={`w-full flex items-center justify-between px-4 py-3 text-sm ${
         divider ? "border-b border-[color:var(--hairline)]" : ""
       }`}
     >
@@ -311,7 +355,7 @@ function CompactSetRow({
           />
         )}
       </span>
-    </button>
+    </div>
   );
 }
 
@@ -322,21 +366,35 @@ function ActiveSet({
   set: SessionSet;
   onCommit: (actual: Actual) => Promise<void>;
 }) {
-  const [reps, setReps] = useState(set.prescribed.reps);
-  const [weight, setWeight] = useState(set.prescribed.weight);
+  // String-backed so typing is intuitive: no forced leading zeros, can be
+  // briefly empty, and focusing selects the whole value to overwrite.
+  const [reps, setReps] = useState(String(set.prescribed.reps));
+  const [weight, setWeight] = useState(String(set.prescribed.weight));
   const [submitting, setSubmitting] = useState<Feeling | null>(null);
 
+  const onRepsChange = (e: React.ChangeEvent<HTMLInputElement>) =>
+    setReps(e.target.value.replace(/[^\d]/g, "").slice(0, 2));
+
+  const onWeightChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    let v = e.target.value.replace(/[^\d.]/g, "");
+    const dot = v.indexOf(".");
+    if (dot !== -1) v = v.slice(0, dot + 1) + v.slice(dot + 1).replace(/\./g, "");
+    setWeight(v.slice(0, 6));
+  };
+
   const commit = async (feeling: Feeling) => {
+    const repsNum = Math.max(0, Math.round(Number(reps) || 0));
+    const weightNum = Math.max(0, Number(weight) || 0);
     setSubmitting(feeling);
     try {
-      await onCommit({ reps, weight, feeling });
+      await onCommit({ reps: repsNum, weight: weightNum, feeling });
     } finally {
       setSubmitting(null);
     }
   };
 
   const numberField =
-    "w-full h-16 rounded-[12px] border-[0.5px] border-[color:var(--hairline)] bg-[#fafaf9] text-center text-3xl font-medium text-foreground outline-none transition-colors focus:border-[var(--teal)] focus:ring-2 focus:ring-[var(--teal)]/15 [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none";
+    "w-full h-16 rounded-[12px] border-[0.5px] border-[color:var(--hairline)] bg-[#fafaf9] text-center text-3xl font-medium text-foreground outline-none transition-colors focus:border-[var(--teal)] focus:ring-2 focus:ring-[var(--teal)]/15";
 
   return (
     <div className="px-4 py-4">
@@ -355,12 +413,11 @@ function ActiveSet({
             Reps
           </span>
           <input
-            type="number"
+            type="text"
             inputMode="numeric"
-            min={0}
-            max={99}
             value={reps}
-            onChange={(e) => setReps(Number(e.target.value))}
+            onChange={onRepsChange}
+            onFocus={(e) => e.target.select()}
             className={`mt-1.5 ${numberField}`}
           />
         </label>
@@ -369,12 +426,11 @@ function ActiveSet({
             Weight (lbs)
           </span>
           <input
-            type="number"
+            type="text"
             inputMode="decimal"
-            min={0}
-            step={2.5}
             value={weight}
-            onChange={(e) => setWeight(Number(e.target.value))}
+            onChange={onWeightChange}
+            onFocus={(e) => e.target.select()}
             className={`mt-1.5 ${numberField}`}
           />
         </label>

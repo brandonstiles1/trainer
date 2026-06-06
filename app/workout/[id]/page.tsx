@@ -83,5 +83,13 @@ export default async function WorkoutPage({ params }: { params: Promise<{ id: st
   const [profile] = await db.select({ rest: profiles.restTimerSeconds }).from(profiles).where(eq(profiles.userId, user.id)).limit(1);
   const restSeconds = profile?.rest ?? 75;
 
-  return <Session workoutId={id} dayName={workout.dayKey} initialSets={sets} restSeconds={restSeconds} />;
+  return (
+    <Session
+      workoutId={id}
+      dayName={workout.dayKey}
+      initialSets={sets}
+      restSeconds={restSeconds}
+      startedAtMs={workout.startedAt.getTime()}
+    />
+  );
 }

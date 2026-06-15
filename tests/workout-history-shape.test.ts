@@ -12,4 +12,13 @@ describe("summarizeWorkout", () => {
     expect(out.exercises.map((e) => e.name)).toEqual(["incline_press", "lateral_raise"]);
     expect(out.exercises[0].sets).toEqual(["8×140", "8×140"]);
   });
+
+  it("excludes unlogged (null actual) sets from volume and set labels", () => {
+    const out = summarizeWorkout([
+      { exerciseName: "bench", setNumber: 1, actual: { reps: 5, weight: 185, feeling: "yellow" } },
+      { exerciseName: "bench", setNumber: 2, actual: null },
+    ]);
+    expect(out.volume).toBe(5 * 185);
+    expect(out.exercises[0].sets).toEqual(["5×185"]);
+  });
 });

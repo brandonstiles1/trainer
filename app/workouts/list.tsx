@@ -30,7 +30,11 @@ export function WorkoutsList({ items }: { items: Item[] }) {
           return (
             <section key={w.id} className="rounded-[13px] bg-white border-[0.5px] border-[color:var(--hairline)] overflow-hidden">
               <div className="flex items-center justify-between px-4 py-3">
-                <button className="min-w-0 text-left" onClick={() => setOpen(isOpen ? null : w.id)}>
+                <button
+                  className="min-w-0 text-left"
+                  aria-expanded={isOpen}
+                  onClick={() => { setMenu(null); setOpen(isOpen ? null : w.id); }}
+                >
                   <h2 className="text-[15px] font-semibold capitalize">{w.dayKey}
                     <span className="ml-2 rounded-full bg-[var(--teal)]/10 px-2 py-0.5 text-[10px] font-medium text-[var(--teal)]">{w.status}</span>
                   </h2>

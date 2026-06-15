@@ -27,7 +27,7 @@ export default async function WorkoutsPage() {
     }));
     return {
       id: s.id, dayKey: s.dayKey, status: s.status,
-      startedAt: s.startedAt.toISOString(), setCount: rows.length,
+      startedAt: s.startedAt.toISOString(), setCount: rows.filter((r) => r.actual !== null).length,
       ...summarizeWorkout(rows),
     };
   });

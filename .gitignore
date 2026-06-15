@@ -46,3 +46,4 @@ next-env.d.ts
 
 # Git worktrees for parallel Plan work
 .worktrees/
+.claude/

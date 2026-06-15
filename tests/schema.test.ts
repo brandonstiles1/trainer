@@ -7,6 +7,7 @@ import {
   workouts,
   workoutSets,
   photos,
+  liftSource,
 } from "@/lib/db/schema";
 
 describe("db schema", () => {
@@ -30,5 +31,14 @@ describe("db schema", () => {
 
   it("workout_sets.prescribed is jsonb", () => {
     expect(workoutSets.prescribed).toBeDefined();
+  });
+});
+
+describe("schema deltas", () => {
+  it("lift_source enum includes user_pinned", () => {
+    expect(liftSource.enumValues).toContain("user_pinned");
+  });
+  it("profiles has last_weekly_review_at", () => {
+    expect(Object.keys(profiles)).toContain("lastWeeklyReviewAt");
   });
 });

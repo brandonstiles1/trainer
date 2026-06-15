@@ -5,6 +5,7 @@ import { plans, workouts } from "@/lib/db/schema";
 import { and, eq } from "drizzle-orm";
 import { StartWorkoutButton } from "./start-workout-button";
 import { ImpromptuBox } from "./impromptu-box";
+import { PlanPreview } from "./plan-preview";
 
 // Server actions on this page (startWorkout / startImpromptuWorkout) call Claude
 // to design the workout, which can take well over the default 10s function limit.
@@ -58,19 +59,7 @@ export default async function TodayPage() {
 
       {planDay ? (
         <section className="space-y-4">
-          <div className="rounded-lg border p-4 bg-muted/30">
-            <p className="text-xs text-muted-foreground uppercase tracking-wide">
-              {planDay.category}
-            </p>
-            <ul className="mt-2 space-y-1 text-sm">
-              {planDay.exercises
-                .slice()
-                .sort((a, b) => a.order - b.order)
-                .map((e) => (
-                  <li key={e.name}>{e.name.replace(/_/g, " ")}</li>
-                ))}
-            </ul>
-          </div>
+          <PlanPreview category={planDay.category} exercises={planDay.exercises} />
           <StartWorkoutButton />
         </section>
       ) : (

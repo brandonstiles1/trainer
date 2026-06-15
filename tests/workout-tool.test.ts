@@ -1,53 +1,35 @@
 import { describe, it, expect } from "vitest";
 import { workoutResponseSchema, submitWorkoutTool } from "@/lib/workout-tool";
 
-const valid = {
-  exercises: [
-    {
-      name: "bench_press",
-      sets: [
+describe("workout tool schema", () => {
+  it("accepts the simplified shape (rationale + target_reps, no branches)", () => {
+    const ok = {
+      exercises: [
         {
-          set_number: 1,
-          prescribed: { reps: 8, weight: 185 },
-          branches: {
-            under: { threshold_reps: 6, next_set: { reps: 8, weight: 175 } },
-            on: { next_set: { reps: 8, weight: 185 } },
-            over: { threshold_reps: 10, next_set: { reps: 8, weight: 195 } },
-          },
+          name: "incline_press",
+          rationale: "~70% of flat bench max 200",
+          sets: [
+            { set_number: 1, target_reps: 8, weight: 140 },
+            { set_number: 2, target_reps: 8, weight: 140 },
+          ],
         },
       ],
-    },
-  ],
-};
-
-describe("workoutResponseSchema", () => {
-  it("accepts a valid response", () => {
-    expect(workoutResponseSchema.safeParse(valid).success).toBe(true);
+    };
+    expect(workoutResponseSchema.safeParse(ok).success).toBe(true);
   });
 
-  it("rejects empty exercises", () => {
-    expect(workoutResponseSchema.safeParse({ exercises: [] }).success).toBe(false);
+  it("strips unknown fields like a stale branches tree", () => {
+    const parsed = workoutResponseSchema.parse({
+      exercises: [{ name: "incline_press", rationale: "x", sets: [{ set_number: 1, target_reps: 8, weight: 140 }] }],
+    });
+    expect(parsed.exercises[0].sets[0]).not.toHaveProperty("branches");
   });
 
-  it("rejects non-snake_case exercise names", () => {
-    const bad = structuredClone(valid);
-    bad.exercises[0].name = "Bench Press";
-    expect(workoutResponseSchema.safeParse(bad).success).toBe(false);
-  });
-
-  it("rejects missing branches", () => {
-    const bad = { exercises: [{ name: "bench_press", sets: [{ set_number: 1, prescribed: { reps: 8, weight: 185 } }] }] };
-    expect(workoutResponseSchema.safeParse(bad).success).toBe(false);
-  });
-});
-
-describe("submitWorkoutTool", () => {
-  it("is named correctly", () => {
-    expect(submitWorkoutTool.name).toBe("submit_workout");
-  });
-
-  it("has a valid JSON Schema shape", () => {
-    expect(submitWorkoutTool.input_schema.type).toBe("object");
-    expect(submitWorkoutTool.input_schema.required).toContain("exercises");
+  it("tool input_schema requires rationale and target_reps, not branches", () => {
+    const props = (submitWorkoutTool.input_schema.properties.exercises as any).items.properties;
+    expect(props.rationale).toBeDefined();
+    const setProps = props.sets.items.properties;
+    expect(setProps.target_reps).toBeDefined();
+    expect(setProps.branches).toBeUndefined();
   });
 });

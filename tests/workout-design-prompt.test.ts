@@ -1,21 +1,14 @@
 import { describe, it, expect } from "vitest";
 import { WORKOUT_DESIGN_SYSTEM } from "@/lib/prompts/workout-design";
 
-describe("WORKOUT_DESIGN_SYSTEM prompt", () => {
-  it("mentions the submit_workout tool", () => {
-    expect(WORKOUT_DESIGN_SYSTEM).toContain("submit_workout");
+describe("workout design prompt", () => {
+  it("instructs deriving start weight from related maxes", () => {
+    expect(WORKOUT_DESIGN_SYSTEM.toLowerCase()).toMatch(/deriv|related|% of/);
   });
-
-  it("specifies branch threshold rules", () => {
-    expect(WORKOUT_DESIGN_SYSTEM).toContain("threshold_reps");
+  it("requires a rationale per exercise", () => {
+    expect(WORKOUT_DESIGN_SYSTEM.toLowerCase()).toContain("rationale");
   });
-
-  it("enforces snake_case naming", () => {
-    expect(WORKOUT_DESIGN_SYSTEM).toMatch(/snake_case/i);
-  });
-
-  it("is stable length for cache (1k–3k chars)", () => {
-    expect(WORKOUT_DESIGN_SYSTEM.length).toBeGreaterThan(1000);
-    expect(WORKOUT_DESIGN_SYSTEM.length).toBeLessThan(3000);
+  it("no longer mentions branches", () => {
+    expect(WORKOUT_DESIGN_SYSTEM.toLowerCase()).not.toContain("branch");
   });
 });

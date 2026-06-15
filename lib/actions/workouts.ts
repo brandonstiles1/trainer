@@ -1,13 +1,16 @@
 "use server";
 
+import { after } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { db } from "@/lib/db";
-import { plans, workouts, workoutSets } from "@/lib/db/schema";
-import { and, asc, eq, inArray } from "drizzle-orm";
+import { plans, workouts, workoutSets, liftEstimates } from "@/lib/db/schema";
+import { and, asc, desc, eq, inArray } from "drizzle-orm";
 import { workoutResponseSchema, type WorkoutResponse } from "@/lib/workout-tool";
-import { applyBranch, type Actual } from "@/lib/branch";
 import { planTodayDiff } from "@/lib/workouts/plan-today-diff";
 import { findPlanDay } from "@/lib/workouts/find-plan-day";
+import { recomputeExercise, type StoredSet } from "@/lib/workouts/recompute-exercise";
+import { toSetRows } from "@/lib/workouts/to-set-rows";
+import type { Actual } from "@/lib/adapt";
 
 type PlanStructure = {
   split: string;
@@ -30,6 +33,11 @@ export async function startWorkout(): Promise<
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) throw new Error("not signed in");
+
+  after(async () => {
+    const { maybeRunWeeklyReview } = await import("@/lib/actions/weekly-review");
+    await maybeRunWeeklyReview(user.id).catch(() => {});
+  });
 
   // Resume an in_progress workout if one exists
   const [inProgress] = await db
@@ -86,14 +94,7 @@ async function createWorkout(params: {
     } as typeof workouts.$inferInsert)
     .returning({ id: workouts.id });
 
-  const setRows = generated.exercises.flatMap((ex) =>
-    ex.sets.map((s) => ({
-      workoutId: workoutRow.id,
-      exerciseName: ex.name,
-      setNumber: s.set_number,
-      prescribed: { reps: s.prescribed.reps, weight: s.prescribed.weight, branches: s.branches },
-    })),
-  );
+  const setRows = toSetRows(workoutRow.id, generated);
   await db.insert(workoutSets).values(setRows as (typeof workoutSets.$inferInsert)[]);
 
   return { workoutId: workoutRow.id };
@@ -105,6 +106,11 @@ export async function startImpromptuWorkout(
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) throw new Error("not signed in");
+
+  after(async () => {
+    const { maybeRunWeeklyReview } = await import("@/lib/actions/weekly-review");
+    await maybeRunWeeklyReview(user.id).catch(() => {});
+  });
 
   // Resume an in_progress workout if one exists (one active workout at a time).
   const [inProgress] = await db
@@ -147,20 +153,18 @@ export async function generateWorkout(params: {
   const { anthropic, model } = await import("@/lib/anthropic");
   const { WORKOUT_DESIGN_SYSTEM } = await import("@/lib/prompts/workout-design");
   const { submitWorkoutTool, workoutResponseSchema } = await import("@/lib/workout-tool");
-  const { liftEstimates, workouts: wt, workoutSets: ws } = await import("@/lib/db/schema");
-  const { and, desc, eq, inArray } = await import("drizzle-orm");
 
   const history = await db
     .select({
-      exerciseName: ws.exerciseName,
-      prescribed: ws.prescribed,
-      actual: ws.actual,
-      completedAt: ws.completedAt,
+      exerciseName: workoutSets.exerciseName,
+      prescribed: workoutSets.prescribed,
+      actual: workoutSets.actual,
+      completedAt: workoutSets.completedAt,
     })
-    .from(ws)
-    .innerJoin(wt, eq(wt.id, ws.workoutId))
-    .where(and(eq(wt.userId, params.userId), inArray(ws.exerciseName, params.exercises)))
-    .orderBy(desc(ws.completedAt))
+    .from(workoutSets)
+    .innerJoin(workouts, eq(workouts.id, workoutSets.workoutId))
+    .where(and(eq(workouts.userId, params.userId), inArray(workoutSets.exerciseName, params.exercises)))
+    .orderBy(desc(workoutSets.completedAt))
     .limit(40);
 
   const estimates = await db
@@ -172,7 +176,7 @@ export async function generateWorkout(params: {
   const userContext =
     `Today is ${params.dayKey} day. Exercises in order: ${params.exercises.join(", ")}.\n\n` +
     (estimates.length
-      ? `Self-reported maxes:\n${estimates.map((e) => `- ${e.exerciseName}: ${e.weightLbs} lbs x ${e.reps} reps`).join("\n")}\n\n`
+      ? `Self-reported & pinned maxes:\n${estimates.map((e) => `- ${e.exerciseName}: ${e.weightLbs} lbs x ${e.reps} reps${e.source === "user_pinned" ? " (PINNED — treat as a floor)" : ""}`).join("\n")}\n\n`
       : "No self-reported maxes.\n\n") +
     (history.length
       ? `Recent sets (newest first):\n${history.slice(0, 20).map((h) => {
@@ -205,53 +209,75 @@ export type CommitSetInput = {
 };
 
 export async function commitSet(input: CommitSetInput): Promise<void> {
+  await writeActualAndRecompute(input.workoutId, input.setId, input.actual);
+}
+
+/** Edit a previously-logged set; identical write + full re-flow of the exercise. */
+export async function editSet(input: CommitSetInput): Promise<void> {
+  await writeActualAndRecompute(input.workoutId, input.setId, input.actual);
+}
+
+async function writeActualAndRecompute(
+  workoutId: string,
+  setId: string,
+  actual: CommitSetInput["actual"],
+): Promise<void> {
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) throw new Error("not signed in");
 
-  // Ownership check + load the set we're committing
   const [row] = await db
     .select({
-      setId: workoutSets.id,
       workoutUserId: workouts.userId,
       exerciseName: workoutSets.exerciseName,
-      setNumber: workoutSets.setNumber,
-      prescribed: workoutSets.prescribed,
     })
     .from(workoutSets)
     .innerJoin(workouts, eq(workouts.id, workoutSets.workoutId))
-    .where(and(eq(workoutSets.id, input.setId), eq(workoutSets.workoutId, input.workoutId)))
+    .where(and(eq(workoutSets.id, setId), eq(workoutSets.workoutId, workoutId)))
     .limit(1);
   if (!row || row.workoutUserId !== user.id) throw new Error("set not found");
 
-  // Write actual + completed_at
-  await db
-    .update(workoutSets)
-    .set({ actual: input.actual, completedAt: new Date() })
-    .where(eq(workoutSets.id, input.setId));
+  // Pinned baseline floor for this exercise (highest pinned weight), 0 if none.
+  const pins = await db
+    .select({ weightLbs: liftEstimates.weightLbs })
+    .from(liftEstimates)
+    .where(
+      and(
+        eq(liftEstimates.userId, user.id),
+        eq(liftEstimates.exerciseName, row.exerciseName),
+        eq(liftEstimates.source, "user_pinned"),
+      ),
+    );
+  const floor = pins.reduce((m, p) => Math.max(m, p.weightLbs), 0);
 
-  // Apply branch logic to the NEXT set for this exercise (if one exists and isn't already completed).
-  const nextSets = await db
+  const ordered = (await db
     .select()
     .from(workoutSets)
-    .where(and(eq(workoutSets.workoutId, input.workoutId), eq(workoutSets.exerciseName, row.exerciseName)))
-    .orderBy(asc(workoutSets.setNumber));
-  const next = nextSets.find((s) => s.setNumber > row.setNumber && s.completedAt === null);
-  if (next) {
-    const prescribed = row.prescribed as { reps: number; weight: number; branches: Parameters<typeof applyBranch>[1] };
-    const adjusted = applyBranch(input.actual, prescribed.branches);
-    const nextPrescribed = next.prescribed as { reps: number; weight: number; branches: unknown };
-    await db
+    .where(and(eq(workoutSets.workoutId, workoutId), eq(workoutSets.exerciseName, row.exerciseName)))
+    .orderBy(asc(workoutSets.setNumber))) as unknown as Array<{
+      id: string;
+      setNumber: number;
+      prescribed: StoredSet["prescribed"];
+      actual: StoredSet["actual"];
+    }>;
+
+  const withActual = ordered.map((r) =>
+    r.id === setId ? { ...r, actual } : r,
+  );
+  const changed = recomputeExercise(
+    withActual.map((r) => ({ id: r.id, setNumber: r.setNumber, prescribed: r.prescribed, actual: r.actual })),
+    floor,
+  );
+
+  await db.transaction(async (tx) => {
+    await tx
       .update(workoutSets)
-      .set({
-        prescribed: {
-          reps: adjusted.reps,
-          weight: adjusted.weight,
-          branches: nextPrescribed.branches,
-        },
-      })
-      .where(eq(workoutSets.id, next.id));
-  }
+      .set({ actual, completedAt: new Date() })
+      .where(eq(workoutSets.id, setId));
+    for (const c of changed) {
+      await tx.update(workoutSets).set({ prescribed: c.prescribed }).where(eq(workoutSets.id, c.id));
+    }
+  });
 }
 
 export async function completeWorkout(workoutId: string): Promise<void> {
@@ -327,14 +353,7 @@ export async function adjustTodayWorkout(params: {
         })
       : { exercises: [] };
 
-  const newSetRows = generated.exercises.flatMap((ex) =>
-    ex.sets.map((s) => ({
-      workoutId: inProgress.id,
-      exerciseName: ex.name,
-      setNumber: s.set_number,
-      prescribed: { reps: s.prescribed.reps, weight: s.prescribed.weight, branches: s.branches },
-    })),
-  );
+  const newSetRows = toSetRows(inProgress.id, generated);
 
   await db.transaction(async (tx) => {
     if (diff.setIdsToDelete.length > 0) {

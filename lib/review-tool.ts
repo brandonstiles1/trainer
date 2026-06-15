@@ -25,7 +25,7 @@ export const submitReviewTool = {
             exercise_name: { type: "string", pattern: "^[a-z0-9_]+$" },
             weight_lbs: { type: "number", minimum: 0 },
             reps: { type: "integer", minimum: 1 },
-            reason: { type: "string" },
+            reason: { type: "string", maxLength: 200 },
           },
         },
       },

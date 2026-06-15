@@ -2,12 +2,12 @@
 
 import { createClient } from "@/lib/supabase/server";
 import { db } from "@/lib/db";
-import { plans, workouts, workoutSets } from "@/lib/db/schema";
+import { plans, workouts, workoutSets, liftEstimates } from "@/lib/db/schema";
 import { and, asc, eq, inArray } from "drizzle-orm";
 import { workoutResponseSchema, type WorkoutResponse } from "@/lib/workout-tool";
-import { applyBranch, type Actual } from "@/lib/branch";
 import { planTodayDiff } from "@/lib/workouts/plan-today-diff";
 import { findPlanDay } from "@/lib/workouts/find-plan-day";
+import { recomputeExercise, type StoredSet } from "@/lib/workouts/recompute-exercise";
 
 type PlanStructure = {
   split: string;
@@ -195,56 +195,74 @@ export async function generateWorkout(params: {
 export type CommitSetInput = {
   workoutId: string;
   setId: string;
-  actual: Actual;
+  actual: { reps: number; weight: number; feeling: "red" | "yellow" | "green" };
 };
 
 export async function commitSet(input: CommitSetInput): Promise<void> {
+  await writeActualAndRecompute(input.workoutId, input.setId, input.actual);
+}
+
+/** Edit a previously-logged set; identical write + full re-flow of the exercise. */
+export async function editSet(input: CommitSetInput): Promise<void> {
+  await writeActualAndRecompute(input.workoutId, input.setId, input.actual);
+}
+
+async function writeActualAndRecompute(
+  workoutId: string,
+  setId: string,
+  actual: CommitSetInput["actual"],
+): Promise<void> {
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) throw new Error("not signed in");
 
-  // Ownership check + load the set we're committing
   const [row] = await db
     .select({
-      setId: workoutSets.id,
       workoutUserId: workouts.userId,
       exerciseName: workoutSets.exerciseName,
-      setNumber: workoutSets.setNumber,
-      prescribed: workoutSets.prescribed,
     })
     .from(workoutSets)
     .innerJoin(workouts, eq(workouts.id, workoutSets.workoutId))
-    .where(and(eq(workoutSets.id, input.setId), eq(workoutSets.workoutId, input.workoutId)))
+    .where(and(eq(workoutSets.id, setId), eq(workoutSets.workoutId, workoutId)))
     .limit(1);
   if (!row || row.workoutUserId !== user.id) throw new Error("set not found");
 
-  // Write actual + completed_at
   await db
     .update(workoutSets)
-    .set({ actual: input.actual, completedAt: new Date() })
-    .where(eq(workoutSets.id, input.setId));
+    .set({ actual, completedAt: new Date() })
+    .where(eq(workoutSets.id, setId));
 
-  // Apply branch logic to the NEXT set for this exercise (if one exists and isn't already completed).
-  const nextSets = await db
+  // Pinned baseline floor for this exercise (highest pinned weight), 0 if none.
+  const pins = await db
+    .select({ weightLbs: liftEstimates.weightLbs })
+    .from(liftEstimates)
+    .where(
+      and(
+        eq(liftEstimates.userId, user.id),
+        eq(liftEstimates.exerciseName, row.exerciseName),
+        eq(liftEstimates.source, "user_pinned"),
+      ),
+    );
+  const floor = pins.reduce((m, p) => Math.max(m, p.weightLbs), 0);
+
+  const ordered = (await db
     .select()
     .from(workoutSets)
-    .where(and(eq(workoutSets.workoutId, input.workoutId), eq(workoutSets.exerciseName, row.exerciseName)))
-    .orderBy(asc(workoutSets.setNumber));
-  const next = nextSets.find((s) => s.setNumber > row.setNumber && s.completedAt === null);
-  if (next) {
-    const prescribed = row.prescribed as { reps: number; weight: number; branches: Parameters<typeof applyBranch>[1] };
-    const adjusted = applyBranch(input.actual, prescribed.branches);
-    const nextPrescribed = next.prescribed as { reps: number; weight: number; branches: unknown };
-    await db
-      .update(workoutSets)
-      .set({
-        prescribed: {
-          reps: adjusted.reps,
-          weight: adjusted.weight,
-          branches: nextPrescribed.branches,
-        },
-      })
-      .where(eq(workoutSets.id, next.id));
+    .where(and(eq(workoutSets.workoutId, workoutId), eq(workoutSets.exerciseName, row.exerciseName)))
+    .orderBy(asc(workoutSets.setNumber))) as unknown as Array<{
+      id: string;
+      setNumber: number;
+      prescribed: StoredSet["prescribed"];
+      actual: StoredSet["actual"];
+    }>;
+
+  const changed = recomputeExercise(
+    ordered.map((r) => ({ id: r.id, setNumber: r.setNumber, prescribed: r.prescribed, actual: r.actual })),
+    floor,
+  );
+
+  for (const c of changed) {
+    await db.update(workoutSets).set({ prescribed: c.prescribed }).where(eq(workoutSets.id, c.id));
   }
 }
 

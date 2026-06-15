@@ -1,15 +1,11 @@
 import type { WorkoutResponse } from "@/lib/workout-tool";
+import type { Prescribed } from "@/lib/adapt";
 
 export type SetRow = {
   workoutId: string;
   exerciseName: string;
   setNumber: number;
-  prescribed: {
-    reps: number;
-    weight: number;
-    targetReps: number;
-    rationale?: string;
-  };
+  prescribed: Prescribed;
 };
 
 /** Flatten a generated workout into workout_sets rows (new prescribed shape). */

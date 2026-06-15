@@ -10,7 +10,7 @@ const setEntry = z.object({
 
 const exerciseEntry = z.object({
   name: z.string().min(1).regex(/^[a-z0-9_]+$/, "snake_case"),
-  rationale: z.string().min(1).max(200),
+  rationale: z.string().min(1).max(160),
   sets: z.array(setEntry).min(1).max(8),
 });
 

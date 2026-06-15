@@ -1,10 +1,10 @@
-import { adaptChain, type AdaptSet } from "@/lib/adapt";
+import { adaptChain, type AdaptSet, type Actual, type Prescribed } from "@/lib/adapt";
 
 export type StoredSet = {
   id: string;
   setNumber: number;
-  prescribed: { reps: number; weight: number; targetReps: number; rationale?: string };
-  actual: { reps: number; weight: number; feeling: "red" | "yellow" | "green" } | null;
+  prescribed: Prescribed;
+  actual: Actual | null;
 };
 
 /**

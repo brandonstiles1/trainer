@@ -3,11 +3,13 @@
 import { createClient } from "@/lib/supabase/server";
 import { db } from "@/lib/db";
 import { plans, workouts, workoutSets, liftEstimates } from "@/lib/db/schema";
-import { and, asc, eq, inArray } from "drizzle-orm";
+import { and, asc, desc, eq, inArray } from "drizzle-orm";
 import { workoutResponseSchema, type WorkoutResponse } from "@/lib/workout-tool";
 import { planTodayDiff } from "@/lib/workouts/plan-today-diff";
 import { findPlanDay } from "@/lib/workouts/find-plan-day";
 import { recomputeExercise, type StoredSet } from "@/lib/workouts/recompute-exercise";
+import { toSetRows } from "@/lib/workouts/to-set-rows";
+import type { Actual } from "@/lib/adapt";
 
 type PlanStructure = {
   split: string;
@@ -86,7 +88,6 @@ async function createWorkout(params: {
     } as typeof workouts.$inferInsert)
     .returning({ id: workouts.id });
 
-  const { toSetRows } = await import("@/lib/workouts/to-set-rows");
   const setRows = toSetRows(workoutRow.id, generated);
   await db.insert(workoutSets).values(setRows as (typeof workoutSets.$inferInsert)[]);
 
@@ -141,20 +142,18 @@ export async function generateWorkout(params: {
   const { anthropic, model } = await import("@/lib/anthropic");
   const { WORKOUT_DESIGN_SYSTEM } = await import("@/lib/prompts/workout-design");
   const { submitWorkoutTool, workoutResponseSchema } = await import("@/lib/workout-tool");
-  const { liftEstimates, workouts: wt, workoutSets: ws } = await import("@/lib/db/schema");
-  const { and, desc, eq, inArray } = await import("drizzle-orm");
 
   const history = await db
     .select({
-      exerciseName: ws.exerciseName,
-      prescribed: ws.prescribed,
-      actual: ws.actual,
-      completedAt: ws.completedAt,
+      exerciseName: workoutSets.exerciseName,
+      prescribed: workoutSets.prescribed,
+      actual: workoutSets.actual,
+      completedAt: workoutSets.completedAt,
     })
-    .from(ws)
-    .innerJoin(wt, eq(wt.id, ws.workoutId))
-    .where(and(eq(wt.userId, params.userId), inArray(ws.exerciseName, params.exercises)))
-    .orderBy(desc(ws.completedAt))
+    .from(workoutSets)
+    .innerJoin(workouts, eq(workouts.id, workoutSets.workoutId))
+    .where(and(eq(workouts.userId, params.userId), inArray(workoutSets.exerciseName, params.exercises)))
+    .orderBy(desc(workoutSets.completedAt))
     .limit(40);
 
   const estimates = await db
@@ -195,7 +194,7 @@ export async function generateWorkout(params: {
 export type CommitSetInput = {
   workoutId: string;
   setId: string;
-  actual: { reps: number; weight: number; feeling: "red" | "yellow" | "green" };
+  actual: Actual;
 };
 
 export async function commitSet(input: CommitSetInput): Promise<void> {
@@ -227,11 +226,6 @@ async function writeActualAndRecompute(
     .limit(1);
   if (!row || row.workoutUserId !== user.id) throw new Error("set not found");
 
-  await db
-    .update(workoutSets)
-    .set({ actual, completedAt: new Date() })
-    .where(eq(workoutSets.id, setId));
-
   // Pinned baseline floor for this exercise (highest pinned weight), 0 if none.
   const pins = await db
     .select({ weightLbs: liftEstimates.weightLbs })
@@ -256,14 +250,23 @@ async function writeActualAndRecompute(
       actual: StoredSet["actual"];
     }>;
 
+  const withActual = ordered.map((r) =>
+    r.id === setId ? { ...r, actual } : r,
+  );
   const changed = recomputeExercise(
-    ordered.map((r) => ({ id: r.id, setNumber: r.setNumber, prescribed: r.prescribed, actual: r.actual })),
+    withActual.map((r) => ({ id: r.id, setNumber: r.setNumber, prescribed: r.prescribed, actual: r.actual })),
     floor,
   );
 
-  for (const c of changed) {
-    await db.update(workoutSets).set({ prescribed: c.prescribed }).where(eq(workoutSets.id, c.id));
-  }
+  await db.transaction(async (tx) => {
+    await tx
+      .update(workoutSets)
+      .set({ actual, completedAt: new Date() })
+      .where(eq(workoutSets.id, setId));
+    for (const c of changed) {
+      await tx.update(workoutSets).set({ prescribed: c.prescribed }).where(eq(workoutSets.id, c.id));
+    }
+  });
 }
 
 export async function completeWorkout(workoutId: string): Promise<void> {
@@ -339,7 +342,6 @@ export async function adjustTodayWorkout(params: {
         })
       : { exercises: [] };
 
-  const { toSetRows } = await import("@/lib/workouts/to-set-rows");
   const newSetRows = toSetRows(inProgress.id, generated);
 
   await db.transaction(async (tx) => {

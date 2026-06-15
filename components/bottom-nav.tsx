@@ -2,13 +2,12 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Flame, LineChart, CalendarDays, Settings, type LucideIcon } from "lucide-react";
+import { Flame, Dumbbell, Settings, type LucideIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 const TABS: { href: string; label: string; Icon: LucideIcon }[] = [
   { href: "/today", label: "Today", Icon: Flame },
-  { href: "/progress", label: "Progress", Icon: LineChart },
-  { href: "/plan", label: "Plan", Icon: CalendarDays },
+  { href: "/workouts", label: "Workouts", Icon: Dumbbell },
   { href: "/settings", label: "Settings", Icon: Settings },
 ];
 
@@ -17,7 +16,7 @@ export function BottomNav() {
 
   return (
     <nav className="fixed bottom-0 left-0 right-0 border-t border-[color:var(--hairline)] bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/70 z-50">
-      <ul className="grid grid-cols-4 h-16 max-w-md mx-auto">
+      <ul className="grid grid-cols-3 h-16 max-w-md mx-auto">
         {TABS.map(({ href, label, Icon }) => {
           const active = pathname.startsWith(href);
           return (

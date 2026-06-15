@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { ChevronDown, ChevronRight, MoreHorizontal, Check, Clock, Timer } from "lucide-react";
-import { adaptChain, type AdaptSet, type Feeling } from "@/lib/adapt";
+import { adaptChain, type Feeling } from "@/lib/adapt";
 import { commitSet, editSet, completeWorkout, abandonWorkout, pinBaseline } from "./actions";
 import { isBigJump } from "@/lib/workouts/pin-trigger";
 import { formatDuration } from "@/lib/format";
@@ -19,7 +19,7 @@ export type SessionSet = {
 
 type Actual = { reps: number; weight: number; feeling: Feeling };
 
-// Feels like the app is "computing" the next set even though applyBranch is instant.
+// Feels like the app is "computing" the next set even though adaptChain is instant.
 const CALCULATING_MS = 850;
 
 const titleCase = (s: string) =>
@@ -144,18 +144,38 @@ function useRestTimer(workoutId: string) {
   };
 }
 
+function applyAdaptChain(
+  sets: SessionSet[],
+  exerciseName: string,
+  baselineFloors: Record<string, number>,
+): SessionSet[] {
+  const exerciseSets = sets
+    .filter((s) => s.exerciseName === exerciseName)
+    .sort((a, b) => a.setNumber - b.setNumber);
+  const adapted = adaptChain(
+    exerciseSets.map((s) => ({ prescribed: s.prescribed, actual: s.actual })),
+    baselineFloors[exerciseName] ?? 0,
+  );
+  return sets.map((s) => {
+    const i = exerciseSets.findIndex((e) => e.id === s.id);
+    return i === -1 ? s : { ...s, prescribed: adapted[i].prescribed };
+  });
+}
+
 export function Session({
   workoutId,
   dayName,
   initialSets,
   restSeconds,
   startedAtMs,
+  baselineFloors,
 }: {
   workoutId: string;
   dayName: string;
   initialSets: SessionSet[];
   restSeconds: number;
   startedAtMs: number;
+  baselineFloors: Record<string, number>;
 }) {
   const router = useRouter();
   const [sets, setSets] = useState(initialSets);
@@ -219,15 +239,7 @@ export function Session({
     );
 
     // Rebuild this exercise's chain client-side for instant feedback (mirrors server).
-    const exerciseSets = updated
-      .filter((s) => s.exerciseName === current.exerciseName)
-      .sort((a, b) => a.setNumber - b.setNumber);
-    const chain: AdaptSet[] = exerciseSets.map((s) => ({ prescribed: s.prescribed, actual: s.actual }));
-    const adapted = adaptChain(chain);
-    updated = updated.map((s) => {
-      const idxIn = exerciseSets.findIndex((e) => e.id === s.id);
-      return idxIn === -1 ? s : { ...s, prescribed: adapted[idxIn].prescribed };
-    });
+    updated = applyAdaptChain(updated, current.exerciseName, baselineFloors);
 
     const nextActive = next ?? updated.find((s) => !s.completed && s.id !== setId) ?? null;
 
@@ -235,38 +247,56 @@ export function Session({
       setPinPrompt({ exerciseName: current.exerciseName, weight: actual.weight, reps: actual.reps });
     }
 
-    // Show the "calculating" beat: clear the active form, surface the loader.
-    setSets(updated);
-    setActiveSetId(null);
-    setCalculatingSetId(setId);
+    const snapshot = sets;
+    try {
+      // Show the "calculating" beat: clear the active form, surface the loader.
+      setSets(updated);
+      setActiveSetId(null);
+      setOpenSetId(null);
+      setCalculatingSetId(setId);
 
-    const minDelay = new Promise<void>((r) => setTimeout(r, CALCULATING_MS));
-    await Promise.all([commitSet({ workoutId, setId, actual }), minDelay]);
+      const minDelay = new Promise<void>((r) => setTimeout(r, CALCULATING_MS));
+      await Promise.all([commitSet({ workoutId, setId, actual }), minDelay]);
 
-    setCalculatingSetId(null);
-    setActiveSetId(nextActive?.id ?? null);
-    if (nextActive) {
-      setExpanded((prev) =>
-        prev.has(nextActive.exerciseName) ? prev : new Set(prev).add(nextActive.exerciseName),
-      );
-      rest.start(restSeconds);
+      setCalculatingSetId(null);
+      setActiveSetId(nextActive?.id ?? null);
+      if (nextActive) {
+        setExpanded((prev) =>
+          prev.has(nextActive.exerciseName) ? prev : new Set(prev).add(nextActive.exerciseName),
+        );
+        rest.start(restSeconds);
+      }
+    } catch {
+      setSets(snapshot);
+      setCalculatingSetId(null);
+      setActiveSetId(setId);
+      alert("Couldn't save that set — please try again.");
     }
   }
 
   async function handleEdit(setId: string, actual: Actual) {
+    const snapshot = sets;
     let updated = sets.map((s) => (s.id === setId ? { ...s, actual } : s));
     const target = updated.find((s) => s.id === setId)!;
-    const exerciseSets = updated
-      .filter((s) => s.exerciseName === target.exerciseName)
-      .sort((a, b) => a.setNumber - b.setNumber);
-    const adapted = adaptChain(exerciseSets.map((s) => ({ prescribed: s.prescribed, actual: s.actual })));
-    updated = updated.map((s) => {
-      const i = exerciseSets.findIndex((e) => e.id === s.id);
-      return i === -1 ? s : { ...s, prescribed: adapted[i].prescribed };
-    });
+    updated = applyAdaptChain(updated, target.exerciseName, baselineFloors);
     setSets(updated);
     setOpenSetId(null);
-    await editSet({ workoutId, setId, actual });
+    try {
+      await editSet({ workoutId, setId, actual });
+    } catch {
+      setSets(snapshot);
+      alert("Couldn't save your edit — please try again.");
+    }
+  }
+
+  async function handlePin() {
+    const p = pinPrompt;
+    setPinPrompt(null);
+    try {
+      await pinBaseline({ exerciseName: p!.exerciseName, weightLbs: p!.weight, reps: p!.reps });
+    } catch {
+      alert("Couldn't pin that baseline.");
+    }
   }
 
   async function handleFinish() {
@@ -339,7 +369,7 @@ export function Session({
               <div className="mt-2 flex gap-2">
                 <button
                   type="button"
-                  onClick={async () => { const p = pinPrompt; setPinPrompt(null); await pinBaseline({ exerciseName: p.exerciseName, weightLbs: p.weight, reps: p.reps }); }}
+                  onClick={handlePin}
                   className="h-9 flex-1 rounded-[10px] bg-[var(--teal)] text-xs font-medium text-white"
                 >Pin baseline</button>
                 <button
@@ -391,7 +421,7 @@ export function Session({
                       }
                       if (s.id === openSetId && s.completed)
                         return <ActiveSet key={s.id} set={s} editing onCommit={(a) => handleEdit(s.id, a)} />;
-                      return <CompactSetRow key={s.id} set={s} divider={!last} onTap={() => setOpenSetId(s.id)} />;
+                      return <CompactSetRow key={s.id} set={s} divider={!last} onTap={s.completed ? () => setOpenSetId(s.id) : undefined} />;
                     })}
                   </div>
                 )}

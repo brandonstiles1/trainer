@@ -1,8 +1,8 @@
 import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import { db } from "@/lib/db";
-import { workouts, workoutSets, profiles, plans } from "@/lib/db/schema";
-import { and, asc, eq } from "drizzle-orm";
+import { workouts, workoutSets, profiles, plans, liftEstimates } from "@/lib/db/schema";
+import { and, asc, eq, inArray } from "drizzle-orm";
 import { Session, type SessionSet } from "./session";
 import { Summary } from "@/components/workout/summary";
 
@@ -82,6 +82,24 @@ export default async function WorkoutPage({ params }: { params: Promise<{ id: st
   const [profile] = await db.select({ rest: profiles.restTimerSeconds }).from(profiles).where(eq(profiles.userId, user.id)).limit(1);
   const restSeconds = profile?.rest ?? 75;
 
+  const exerciseNames = [...new Set(sets.map((s) => s.exerciseName))];
+  const pins = exerciseNames.length
+    ? await db
+        .select({ exerciseName: liftEstimates.exerciseName, weightLbs: liftEstimates.weightLbs })
+        .from(liftEstimates)
+        .where(
+          and(
+            eq(liftEstimates.userId, user.id),
+            eq(liftEstimates.source, "user_pinned"),
+            inArray(liftEstimates.exerciseName, exerciseNames),
+          ),
+        )
+    : [];
+  const baselineFloors: Record<string, number> = {};
+  for (const p of pins) {
+    baselineFloors[p.exerciseName] = Math.max(baselineFloors[p.exerciseName] ?? 0, p.weightLbs);
+  }
+
   return (
     <Session
       workoutId={id}
@@ -89,6 +107,7 @@ export default async function WorkoutPage({ params }: { params: Promise<{ id: st
       initialSets={sets}
       restSeconds={restSeconds}
       startedAtMs={workout.startedAt.getTime()}
+      baselineFloors={baselineFloors}
     />
   );
 }

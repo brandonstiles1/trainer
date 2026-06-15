@@ -5,9 +5,6 @@ import { workouts, workoutSets, profiles, plans } from "@/lib/db/schema";
 import { and, asc, eq } from "drizzle-orm";
 import { Session, type SessionSet } from "./session";
 import { Summary } from "@/components/workout/summary";
-import type { applyBranch } from "@/lib/branch";
-
-type Branches = Parameters<typeof applyBranch>[1];
 
 type PlanStructure = {
   days: Array<{
@@ -69,12 +66,14 @@ export default async function WorkoutPage({ params }: { params: Promise<{ id: st
   }
 
   const sets: SessionSet[] = sortedRows.map((r) => {
-    const p = r.prescribed as { reps: number; weight: number; branches: Branches };
+    const p = r.prescribed as {
+      reps: number; weight: number; targetReps?: number; rationale?: string;
+    };
     return {
       id: r.id,
       exerciseName: r.exerciseName,
       setNumber: r.setNumber,
-      prescribed: { reps: p.reps, weight: p.weight, branches: p.branches },
+      prescribed: { reps: p.reps, weight: p.weight, targetReps: p.targetReps ?? p.reps, rationale: p.rationale },
       completed: r.completedAt !== null,
       actual: r.actual as SessionSet["actual"],
     };

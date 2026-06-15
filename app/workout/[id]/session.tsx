@@ -185,6 +185,7 @@ export function Session({
   const [calculatingSetId, setCalculatingSetId] = useState<string | null>(null);
   const [openSetId, setOpenSetId] = useState<string | null>(null);
   const [pinPrompt, setPinPrompt] = useState<{ exerciseName: string; weight: number; reps: number } | null>(null);
+  const [confirmingAbandon, setConfirmingAbandon] = useState(false);
   // Manual collapse/expand, independent of which set is active. Start with the
   // current exercise open.
   const [expanded, setExpanded] = useState<Set<string>>(() => {
@@ -276,7 +277,8 @@ export function Session({
 
   async function handleEdit(setId: string, actual: Actual) {
     const snapshot = sets;
-    let updated = sets.map((s) => (s.id === setId ? { ...s, actual } : s));
+    // Logging any set (including one not yet reached) marks it complete and re-flows downstream.
+    let updated = sets.map((s) => (s.id === setId ? { ...s, actual, completed: true } : s));
     const target = updated.find((s) => s.id === setId)!;
     updated = applyAdaptChain(updated, target.exerciseName, baselineFloors);
     setSets(updated);
@@ -306,7 +308,7 @@ export function Session({
   }
 
   async function handleAbandon() {
-    if (!confirm("Abandon this workout? Your progress so far is kept.")) return;
+    setConfirmingAbandon(false);
     rest.skip();
     await abandonWorkout(workoutId);
     router.push("/today");
@@ -328,8 +330,8 @@ export function Session({
               </span>
               <button
                 type="button"
-                onClick={handleAbandon}
-                aria-label="Workout options"
+                onClick={() => setConfirmingAbandon(true)}
+                aria-label="Quit workout"
                 className="-mr-1 p-1 text-white/60 hover:text-white transition-colors"
               >
                 <MoreHorizontal className="size-5" />
@@ -419,9 +421,9 @@ export function Session({
                       if (s.id === calculatingSetId) {
                         return <CalculatingNext key={s.id} />;
                       }
-                      if (s.id === openSetId && s.completed)
+                      if (s.id === openSetId)
                         return <ActiveSet key={s.id} set={s} editing onCommit={(a) => handleEdit(s.id, a)} />;
-                      return <CompactSetRow key={s.id} set={s} divider={!last} onTap={s.completed ? () => setOpenSetId(s.id) : undefined} />;
+                      return <CompactSetRow key={s.id} set={s} divider={!last} onTap={() => setOpenSetId(s.id)} />;
                     })}
                   </div>
                 )}
@@ -443,6 +445,39 @@ export function Session({
           </button>
         </main>
       </div>
+
+      {confirmingAbandon && (
+        <div
+          className="fixed inset-0 z-50 flex items-end justify-center bg-black/40 px-4 pb-8 animate-in fade-in"
+          onClick={() => setConfirmingAbandon(false)}
+        >
+          <div
+            className="w-full max-w-sm rounded-[18px] bg-white p-5 shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 className="text-base font-semibold text-foreground">Quit this workout?</h3>
+            <p className="mt-1 text-sm text-muted-foreground">
+              Your completed sets are kept. You can pick a workout again anytime.
+            </p>
+            <div className="mt-4 flex gap-2">
+              <button
+                type="button"
+                onClick={() => setConfirmingAbandon(false)}
+                className="h-11 flex-1 rounded-[12px] border-[0.5px] border-[color:var(--hairline)] text-sm font-medium text-foreground"
+              >
+                Keep going
+              </button>
+              <button
+                type="button"
+                onClick={handleAbandon}
+                className="h-11 flex-1 rounded-[12px] bg-[var(--feel-hard-bg)] text-sm font-medium text-[var(--feel-hard-fg)]"
+              >
+                Quit workout
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

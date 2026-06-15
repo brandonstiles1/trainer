@@ -86,14 +86,8 @@ async function createWorkout(params: {
     } as typeof workouts.$inferInsert)
     .returning({ id: workouts.id });
 
-  const setRows = generated.exercises.flatMap((ex) =>
-    ex.sets.map((s) => ({
-      workoutId: workoutRow.id,
-      exerciseName: ex.name,
-      setNumber: s.set_number,
-      prescribed: { reps: s.prescribed.reps, weight: s.prescribed.weight, branches: s.branches },
-    })),
-  );
+  const { toSetRows } = await import("@/lib/workouts/to-set-rows");
+  const setRows = toSetRows(workoutRow.id, generated);
   await db.insert(workoutSets).values(setRows as (typeof workoutSets.$inferInsert)[]);
 
   return { workoutId: workoutRow.id };
@@ -172,7 +166,7 @@ export async function generateWorkout(params: {
   const userContext =
     `Today is ${params.dayKey} day. Exercises in order: ${params.exercises.join(", ")}.\n\n` +
     (estimates.length
-      ? `Self-reported maxes:\n${estimates.map((e) => `- ${e.exerciseName}: ${e.weightLbs} lbs x ${e.reps} reps`).join("\n")}\n\n`
+      ? `Self-reported & pinned maxes:\n${estimates.map((e) => `- ${e.exerciseName}: ${e.weightLbs} lbs x ${e.reps} reps${e.source === "user_pinned" ? " (PINNED — treat as a floor)" : ""}`).join("\n")}\n\n`
       : "No self-reported maxes.\n\n") +
     (history.length
       ? `Recent sets (newest first):\n${history.slice(0, 20).map((h) => {
@@ -327,14 +321,8 @@ export async function adjustTodayWorkout(params: {
         })
       : { exercises: [] };
 
-  const newSetRows = generated.exercises.flatMap((ex) =>
-    ex.sets.map((s) => ({
-      workoutId: inProgress.id,
-      exerciseName: ex.name,
-      setNumber: s.set_number,
-      prescribed: { reps: s.prescribed.reps, weight: s.prescribed.weight, branches: s.branches },
-    })),
-  );
+  const { toSetRows } = await import("@/lib/workouts/to-set-rows");
+  const newSetRows = toSetRows(inProgress.id, generated);
 
   await db.transaction(async (tx) => {
     if (diff.setIdsToDelete.length > 0) {

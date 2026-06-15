@@ -4,7 +4,8 @@ import { useCallback, useEffect, useMemo, useState, useTransition } from "react"
 import { useRouter } from "next/navigation";
 import { ChevronDown, ChevronRight, MoreHorizontal, Check, Clock, Timer } from "lucide-react";
 import { adaptChain, type AdaptSet, type Feeling } from "@/lib/adapt";
-import { commitSet, editSet, completeWorkout, abandonWorkout } from "./actions";
+import { commitSet, editSet, completeWorkout, abandonWorkout, pinBaseline } from "./actions";
+import { isBigJump } from "@/lib/workouts/pin-trigger";
 import { formatDuration } from "@/lib/format";
 
 export type SessionSet = {
@@ -163,6 +164,7 @@ export function Session({
   );
   const [calculatingSetId, setCalculatingSetId] = useState<string | null>(null);
   const [openSetId, setOpenSetId] = useState<string | null>(null);
+  const [pinPrompt, setPinPrompt] = useState<{ exerciseName: string; weight: number; reps: number } | null>(null);
   // Manual collapse/expand, independent of which set is active. Start with the
   // current exercise open.
   const [expanded, setExpanded] = useState<Set<string>>(() => {
@@ -228,6 +230,10 @@ export function Session({
     });
 
     const nextActive = next ?? updated.find((s) => !s.completed && s.id !== setId) ?? null;
+
+    if (isBigJump(current.prescribed.weight, actual.weight)) {
+      setPinPrompt({ exerciseName: current.exerciseName, weight: actual.weight, reps: actual.reps });
+    }
 
     // Show the "calculating" beat: clear the active form, surface the loader.
     setSets(updated);
@@ -324,6 +330,27 @@ export function Session({
 
         {/* ── Exercise cards ── */}
         <main className="px-4 py-4 space-y-3 pb-28">
+          {pinPrompt && (
+            <div className="mx-4 mb-3 rounded-[12px] border-[0.5px] border-[var(--teal)]/40 bg-[var(--teal)]/5 p-3">
+              <p className="text-sm font-medium text-[var(--teal)]">Big jump — pin {pinPrompt.weight} lbs?</p>
+              <p className="mt-1 text-[11px] text-[var(--teal)]/80">
+                Future {titleCase(pinPrompt.exerciseName)} workouts will start from here.
+              </p>
+              <div className="mt-2 flex gap-2">
+                <button
+                  type="button"
+                  onClick={async () => { const p = pinPrompt; setPinPrompt(null); await pinBaseline({ exerciseName: p.exerciseName, weightLbs: p.weight, reps: p.reps }); }}
+                  className="h-9 flex-1 rounded-[10px] bg-[var(--teal)] text-xs font-medium text-white"
+                >Pin baseline</button>
+                <button
+                  type="button"
+                  onClick={() => setPinPrompt(null)}
+                  className="h-9 flex-1 rounded-[10px] border-[0.5px] border-[color:var(--hairline)] text-xs font-medium text-muted-foreground"
+                >Not now</button>
+              </div>
+            </div>
+          )}
+
           {byExercise.map(([exerciseName, exerciseSets]) => {
             const done = exerciseSets.filter((s) => s.completed).length;
             const total = exerciseSets.length;

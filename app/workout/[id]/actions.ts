@@ -7,6 +7,7 @@ import {
   abandonWorkout as abandonWorkoutImpl,
 } from "@/lib/actions/workouts";
 import type { CommitSetInput } from "@/lib/actions/workouts";
+import { pinBaseline as pinBaselineImpl } from "@/lib/actions/lift-estimates";
 
 export async function commitSet(input: CommitSetInput) {
   return commitSetImpl(input);
@@ -19,4 +20,7 @@ export async function completeWorkout(workoutId: string) {
 }
 export async function abandonWorkout(workoutId: string) {
   return abandonWorkoutImpl(workoutId);
+}
+export async function pinBaseline(i: { exerciseName: string; weightLbs: number; reps: number }) {
+  return pinBaselineImpl(i);
 }

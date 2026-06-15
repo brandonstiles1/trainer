@@ -33,6 +33,10 @@ export async function startWorkout(): Promise<
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) throw new Error("not signed in");
 
+  void import("@/lib/actions/weekly-review").then(({ maybeRunWeeklyReview }) =>
+    maybeRunWeeklyReview(user.id).catch(() => {}),
+  );
+
   // Resume an in_progress workout if one exists
   const [inProgress] = await db
     .select()
@@ -100,6 +104,10 @@ export async function startImpromptuWorkout(
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) throw new Error("not signed in");
+
+  void import("@/lib/actions/weekly-review").then(({ maybeRunWeeklyReview }) =>
+    maybeRunWeeklyReview(user.id).catch(() => {}),
+  );
 
   // Resume an in_progress workout if one exists (one active workout at a time).
   const [inProgress] = await db

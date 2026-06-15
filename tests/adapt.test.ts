@@ -50,7 +50,7 @@ describe("adaptChain", () => {
     expect(out[1].prescribed.weight).toBeGreaterThanOrEqual(50);
   });
 
-  it("editing an earlier set re-flows everything after it", () => {
+  it("recomputes the set immediately after a logged set", () => {
     const chain = [logged(seed(8, 140), 8, 155, "yellow"), seed(8, 140), seed(8, 140)];
     const out = adaptChain(chain);
     const set2 = out[1].prescribed.weight;
@@ -61,5 +61,21 @@ describe("adaptChain", () => {
   it("does not recompute a set whose predecessor has no actual yet", () => {
     const out = adaptChain([seed(8, 140), seed(8, 140)]);
     expect(out[1].prescribed.weight).toBe(140);
+  });
+
+  it("handles an empty array", () => {
+    expect(adaptChain([])).toEqual([]);
+  });
+
+  it("re-flows multiple levels when intermediate sets are also logged", () => {
+    const out = adaptChain([
+      logged(seed(8, 140), 8, 160, "yellow"),
+      logged(seed(8, 140), 8, 150, "yellow"),
+      seed(8, 140),
+    ]);
+    // set 2 recomputed off set 1's 160; set 3 recomputed off set 2's logged 150
+    expect(out[1].prescribed.weight).toBeGreaterThan(140);
+    expect(out[2].prescribed.weight).toBeGreaterThan(140);
+    expect(out[2].prescribed.rationale).toMatch(/1RM/);
   });
 });

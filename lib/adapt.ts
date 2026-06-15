@@ -8,8 +8,15 @@ export type Prescribed = {
 };
 export type AdaptSet = { prescribed: Prescribed; actual: Actual | null };
 
-/** Rep buffer (RIR) by how the previous set felt. Tunable. */
-const BUFFER: Record<Feeling, number> = { yellow: 2, green: 0, red: 3 };
+/** Rep buffer (RIR) applied to the NEXT set based on how the previous set felt. Tunable. */
+const BUFFER: Record<Feeling, number> = {
+  yellow: 2,
+  // green=0 (not 1): an easy set makes Epley UNDER-estimate true 1RM, so the
+  // projection already bakes in real-world reps-in-reserve — no extra buffer
+  // needed. (Also, with 5-lb rounding green=1 would tie with yellow.)
+  green: 0,
+  red: 3,
+};
 
 /**
  * Recompute the prescribed weight for every set after the first, from the
@@ -22,6 +29,7 @@ export function adaptChain(sets: AdaptSet[], baselineFloor = 0): AdaptSet[] {
     if (i === 0) return set; // seed (set 1) is authoritative
     const prev = sets[i - 1].actual;
     if (!prev) return set; // predecessor not logged → leave seed value
+    if (!Number.isFinite(prev.weight) || !Number.isFinite(prev.reps)) return set;
     const e1rm = estimate1RM(prev.weight, prev.reps);
     const buffer = BUFFER[prev.feeling];
     const targetReps = set.prescribed.targetReps;

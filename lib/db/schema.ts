@@ -21,6 +21,7 @@ export const workoutStatus = pgEnum("workout_status", [
 export const liftSource = pgEnum("lift_source", [
   "user",
   "inferred_from_workout",
+  "user_pinned",
 ]);
 
 // ────────── tables ──────────
@@ -30,6 +31,7 @@ export const profiles = pgTable("profiles", {
   heightIn: integer("height_in"),
   weightLbs: integer("weight_lbs"),
   restTimerSeconds: integer("rest_timer_seconds").notNull().default(75),
+  lastWeeklyReviewAt: timestamp("last_weekly_review_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });

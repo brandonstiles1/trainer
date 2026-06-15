@@ -3,17 +3,15 @@
 import { useCallback, useEffect, useMemo, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { ChevronDown, MoreHorizontal, Check, Clock, Timer } from "lucide-react";
-import { commitSet, completeWorkout, abandonWorkout } from "./actions";
-import { applyBranch, type Feeling } from "@/lib/branch";
+import { adaptChain, type AdaptSet, type Feeling } from "@/lib/adapt";
+import { commitSet, editSet, completeWorkout, abandonWorkout } from "./actions";
 import { formatDuration } from "@/lib/format";
-
-type Branches = Parameters<typeof applyBranch>[1];
 
 export type SessionSet = {
   id: string;
   exerciseName: string;
   setNumber: number;
-  prescribed: { reps: number; weight: number; branches: Branches };
+  prescribed: { reps: number; weight: number; targetReps: number; rationale?: string };
   completed: boolean;
   actual: { reps: number; weight: number; feeling: Feeling } | null;
 };
@@ -216,14 +214,18 @@ export function Session({
     let updated = sets.map((s) =>
       s.id === setId ? { ...s, completed: true, actual } : s,
     );
-    if (next) {
-      const adjusted = applyBranch(actual, current.prescribed.branches);
-      updated = updated.map((s) =>
-        s.id === next.id
-          ? { ...s, prescribed: { ...s.prescribed, reps: adjusted.reps, weight: adjusted.weight } }
-          : s,
-      );
-    }
+
+    // Rebuild this exercise's chain client-side for instant feedback (mirrors server).
+    const exerciseSets = updated
+      .filter((s) => s.exerciseName === current.exerciseName)
+      .sort((a, b) => a.setNumber - b.setNumber);
+    const chain: AdaptSet[] = exerciseSets.map((s) => ({ prescribed: s.prescribed, actual: s.actual }));
+    const adapted = adaptChain(chain);
+    updated = updated.map((s) => {
+      const idxIn = exerciseSets.findIndex((e) => e.id === s.id);
+      return idxIn === -1 ? s : { ...s, prescribed: adapted[idxIn].prescribed };
+    });
+
     const nextActive = next ?? updated.find((s) => !s.completed && s.id !== setId) ?? null;
 
     // Show the "calculating" beat: clear the active form, surface the loader.
@@ -282,6 +284,11 @@ export function Session({
             </div>
           </div>
 
+          <div className="mt-2 flex items-baseline gap-2">
+            <span className="text-2xl font-semibold tabular-nums text-white">{formatVolume(volume)}</span>
+            <span className="text-[11px] uppercase tracking-wide text-white/60">lbs lifted</span>
+          </div>
+
           {rest.active ? (
             <NavRestTimer
               remainingMs={rest.remainingMs}
@@ -294,8 +301,6 @@ export function Session({
               <Stat label="Exercises" value={String(byExercise.length)} />
               <span className="h-3 w-px bg-white/20" />
               <Stat label="Sets" value={`${completedCount}/${sets.length}`} />
-              <span className="h-3 w-px bg-white/20" />
-              <Stat label="Volume" value={formatVolume(volume)} />
             </div>
           )}
         </header>
@@ -504,16 +509,19 @@ function CompactSetRow({ set, divider }: { set: SessionSet; divider: boolean }) 
 
 function ActiveSet({
   set,
+  editing,
   onCommit,
 }: {
   set: SessionSet;
+  editing?: boolean;
   onCommit: (actual: Actual) => Promise<void>;
 }) {
   // String-backed so typing is intuitive: no forced leading zeros, can be
   // briefly empty, and focusing selects the whole value to overwrite.
-  const [reps, setReps] = useState(String(set.prescribed.reps));
-  const [weight, setWeight] = useState(String(set.prescribed.weight));
+  const [reps, setReps] = useState(String((editing ? set.actual?.reps : undefined) ?? set.prescribed.reps));
+  const [weight, setWeight] = useState(String((editing ? set.actual?.weight : undefined) ?? set.prescribed.weight));
   const [submitting, setSubmitting] = useState<Feeling | null>(null);
+  const [showWhy, setShowWhy] = useState(false);
 
   const onRepsChange = (e: React.ChangeEvent<HTMLInputElement>) =>
     setReps(e.target.value.replace(/[^\d]/g, "").slice(0, 2));
@@ -542,13 +550,28 @@ function ActiveSet({
   return (
     <div className="px-4 py-4">
       <div className="flex items-center justify-between">
-        <p className="text-[11px] font-normal uppercase tracking-wide text-muted-foreground">
-          Set {set.setNumber} · prescribed {set.prescribed.reps} × {set.prescribed.weight}
-        </p>
+        <div className="flex items-center gap-1">
+          <p className="text-[11px] font-normal uppercase tracking-wide text-muted-foreground">
+            Set {set.setNumber} · prescribed {set.prescribed.reps} × {set.prescribed.weight}
+          </p>
+          {set.prescribed.rationale && (
+            <button
+              type="button"
+              onClick={() => setShowWhy((v) => !v)}
+              aria-label="Why this number?"
+              className="ml-1.5 inline-flex size-4 items-center justify-center rounded-full border border-[var(--teal)] text-[10px] font-bold text-[var(--teal)]"
+            >i</button>
+          )}
+        </div>
         <span className="rounded-full bg-[var(--teal)]/10 px-2 py-0.5 text-[11px] font-medium text-[var(--teal)]">
-          active
+          {editing ? "editing" : "active"}
         </span>
       </div>
+      {showWhy && set.prescribed.rationale && (
+        <p className="mt-2 rounded-[8px] border-[0.5px] border-[var(--teal)]/30 bg-[var(--teal)]/5 px-2.5 py-2 text-[11px] leading-snug text-[var(--teal)]">
+          {set.prescribed.rationale}
+        </p>
+      )}
 
       <div className="mt-3 grid grid-cols-2 gap-3">
         <label className="block">

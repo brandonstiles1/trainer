@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
-import { ChevronDown, MoreHorizontal, Check, Clock, Timer } from "lucide-react";
+import { ChevronDown, ChevronRight, MoreHorizontal, Check, Clock, Timer } from "lucide-react";
 import { adaptChain, type AdaptSet, type Feeling } from "@/lib/adapt";
 import { commitSet, editSet, completeWorkout, abandonWorkout } from "./actions";
 import { formatDuration } from "@/lib/format";
@@ -162,6 +162,7 @@ export function Session({
     () => initialSets.find((s) => !s.completed)?.id ?? null,
   );
   const [calculatingSetId, setCalculatingSetId] = useState<string | null>(null);
+  const [openSetId, setOpenSetId] = useState<string | null>(null);
   // Manual collapse/expand, independent of which set is active. Start with the
   // current exercise open.
   const [expanded, setExpanded] = useState<Set<string>>(() => {
@@ -244,6 +245,22 @@ export function Session({
       );
       rest.start(restSeconds);
     }
+  }
+
+  async function handleEdit(setId: string, actual: Actual) {
+    let updated = sets.map((s) => (s.id === setId ? { ...s, actual } : s));
+    const target = updated.find((s) => s.id === setId)!;
+    const exerciseSets = updated
+      .filter((s) => s.exerciseName === target.exerciseName)
+      .sort((a, b) => a.setNumber - b.setNumber);
+    const adapted = adaptChain(exerciseSets.map((s) => ({ prescribed: s.prescribed, actual: s.actual })));
+    updated = updated.map((s) => {
+      const i = exerciseSets.findIndex((e) => e.id === s.id);
+      return i === -1 ? s : { ...s, prescribed: adapted[i].prescribed };
+    });
+    setSets(updated);
+    setOpenSetId(null);
+    await editSet({ workoutId, setId, actual });
   }
 
   async function handleFinish() {
@@ -345,7 +362,9 @@ export function Session({
                       if (s.id === calculatingSetId) {
                         return <CalculatingNext key={s.id} />;
                       }
-                      return <CompactSetRow key={s.id} set={s} divider={!last} />;
+                      if (s.id === openSetId && s.completed)
+                        return <ActiveSet key={s.id} set={s} editing onCommit={(a) => handleEdit(s.id, a)} />;
+                      return <CompactSetRow key={s.id} set={s} divider={!last} onTap={() => setOpenSetId(s.id)} />;
                     })}
                   </div>
                 )}
@@ -479,14 +498,10 @@ function CalculatingNext() {
   );
 }
 
-function CompactSetRow({ set, divider }: { set: SessionSet; divider: boolean }) {
+function CompactSetRow({ set, divider, onTap }: { set: SessionSet; divider: boolean; onTap?: () => void }) {
   const done = set.completed && set.actual;
-  return (
-    <div
-      className={`w-full flex items-center justify-between px-4 py-3 text-sm ${
-        divider ? "border-b border-[color:var(--hairline)]" : ""
-      }`}
-    >
+  const inner = (
+    <>
       <span className="flex items-center gap-2 font-normal text-muted-foreground">
         {done && <Check className="size-3.5" style={{ color: "var(--teal)" }} />}
         Set {set.setNumber}
@@ -502,7 +517,32 @@ function CompactSetRow({ set, divider }: { set: SessionSet; divider: boolean }) 
             style={{ backgroundColor: feelColor[set.actual!.feeling] }}
           />
         )}
+        {onTap && <ChevronRight className="size-3.5 text-muted-foreground/50" />}
       </span>
+    </>
+  );
+
+  if (onTap) {
+    return (
+      <button
+        type="button"
+        onClick={onTap}
+        className={`w-full flex items-center justify-between px-4 py-3 text-sm text-left ${
+          divider ? "border-b border-[color:var(--hairline)]" : ""
+        }`}
+      >
+        {inner}
+      </button>
+    );
+  }
+
+  return (
+    <div
+      className={`w-full flex items-center justify-between px-4 py-3 text-sm ${
+        divider ? "border-b border-[color:var(--hairline)]" : ""
+      }`}
+    >
+      {inner}
     </div>
   );
 }

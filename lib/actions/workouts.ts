@@ -4,7 +4,7 @@ import { after } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { db } from "@/lib/db";
 import { plans, workouts, workoutSets, liftEstimates } from "@/lib/db/schema";
-import { and, asc, desc, eq, inArray } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull } from "drizzle-orm";
 import { workoutResponseSchema, type WorkoutResponse } from "@/lib/workout-tool";
 import { planTodayDiff } from "@/lib/workouts/plan-today-diff";
 import { findPlanDay } from "@/lib/workouts/find-plan-day";
@@ -277,6 +277,80 @@ async function writeActualAndRecompute(
     for (const c of changed) {
       await tx.update(workoutSets).set({ prescribed: c.prescribed }).where(eq(workoutSets.id, c.id));
     }
+  });
+}
+
+/** Mark a not-yet-logged set as skipped: resolved (completedAt) with no actual. */
+export async function skipSet(input: { workoutId: string; setId: string }): Promise<void> {
+  const supabase = await createClient();
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) throw new Error("not signed in");
+
+  const [row] = await db
+    .select({ workoutUserId: workouts.userId })
+    .from(workoutSets)
+    .innerJoin(workouts, eq(workouts.id, workoutSets.workoutId))
+    .where(and(eq(workoutSets.id, input.setId), eq(workoutSets.workoutId, input.workoutId)))
+    .limit(1);
+  if (!row || row.workoutUserId !== user.id) throw new Error("set not found");
+
+  await db
+    .update(workoutSets)
+    .set({ actual: null, completedAt: new Date() })
+    .where(eq(workoutSets.id, input.setId));
+}
+
+/** Skip every remaining (unresolved) set of one exercise in a workout. */
+export async function skipExercise(input: {
+  workoutId: string;
+  exerciseName: string;
+}): Promise<void> {
+  const supabase = await createClient();
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) throw new Error("not signed in");
+
+  const [workout] = await db
+    .select({ userId: workouts.userId })
+    .from(workouts)
+    .where(eq(workouts.id, input.workoutId))
+    .limit(1);
+  if (!workout || workout.userId !== user.id) throw new Error("workout not found");
+
+  await db
+    .update(workoutSets)
+    .set({ actual: null, completedAt: new Date() })
+    .where(
+      and(
+        eq(workoutSets.workoutId, input.workoutId),
+        eq(workoutSets.exerciseName, input.exerciseName),
+        isNull(workoutSets.completedAt),
+      ),
+    );
+}
+
+/** Wipe all logged/skipped sets and restart the clock; prescriptions stay in place. */
+export async function restartWorkout(workoutId: string): Promise<void> {
+  const supabase = await createClient();
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) throw new Error("not signed in");
+
+  const [workout] = await db
+    .select({ userId: workouts.userId, status: workouts.status })
+    .from(workouts)
+    .where(eq(workouts.id, workoutId))
+    .limit(1);
+  if (!workout || workout.userId !== user.id) throw new Error("workout not found");
+  if (workout.status !== "in_progress") throw new Error("workout is not in progress");
+
+  await db.transaction(async (tx) => {
+    await tx
+      .update(workoutSets)
+      .set({ actual: null, completedAt: null })
+      .where(eq(workoutSets.workoutId, workoutId));
+    await tx
+      .update(workouts)
+      .set({ startedAt: new Date() })
+      .where(eq(workouts.id, workoutId));
   });
 }
 

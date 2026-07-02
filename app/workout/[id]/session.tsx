@@ -4,7 +4,16 @@ import { useCallback, useEffect, useMemo, useState, useTransition } from "react"
 import { useRouter } from "next/navigation";
 import { ChevronDown, ChevronRight, MoreHorizontal, Check, Clock, Timer } from "lucide-react";
 import { adaptChain, type Feeling } from "@/lib/adapt";
-import { commitSet, editSet, completeWorkout, abandonWorkout, pinBaseline } from "./actions";
+import {
+  commitSet,
+  editSet,
+  completeWorkout,
+  abandonWorkout,
+  pinBaseline,
+  skipSet,
+  skipExercise,
+  restartWorkout,
+} from "./actions";
 import { isBigJump } from "@/lib/workouts/pin-trigger";
 import { formatDuration } from "@/lib/format";
 
@@ -185,7 +194,8 @@ export function Session({
   const [calculatingSetId, setCalculatingSetId] = useState<string | null>(null);
   const [openSetId, setOpenSetId] = useState<string | null>(null);
   const [pinPrompt, setPinPrompt] = useState<{ exerciseName: string; weight: number; reps: number } | null>(null);
-  const [confirmingAbandon, setConfirmingAbandon] = useState(false);
+  // Bottom sheet: workout menu (restart/quit) or a confirm step reached from it / from Finish.
+  const [sheet, setSheet] = useState<"menu" | "restart" | "finish" | null>(null);
   // Manual collapse/expand, independent of which set is active. Start with the
   // current exercise open.
   const [expanded, setExpanded] = useState<Set<string>>(() => {
@@ -265,8 +275,9 @@ export function Session({
         setExpanded((prev) =>
           prev.has(nextActive.exerciseName) ? prev : new Set(prev).add(nextActive.exerciseName),
         );
-        rest.start(restSeconds);
       }
+      // Anytime "done" is tapped the rest clock starts — even on the workout's last set.
+      rest.start(restSeconds);
     } catch {
       setSets(snapshot);
       setCalculatingSetId(null);
@@ -301,14 +312,87 @@ export function Session({
     }
   }
 
+  async function handleSkipSet(setId: string) {
+    const idx = sets.findIndex((s) => s.id === setId);
+    if (idx === -1) return;
+    const current = sets[idx];
+
+    const updated = sets.map((s) =>
+      s.id === setId ? { ...s, completed: true, actual: null } : s,
+    );
+    const nextActive =
+      updated.find(
+        (s, i) => i > idx && s.exerciseName === current.exerciseName && !s.completed,
+      ) ?? updated.find((s) => !s.completed) ?? null;
+
+    const snapshot = sets;
+    setSets(updated);
+    setActiveSetId(nextActive?.id ?? null);
+    setOpenSetId(null);
+    if (nextActive) {
+      setExpanded((prev) =>
+        prev.has(nextActive.exerciseName) ? prev : new Set(prev).add(nextActive.exerciseName),
+      );
+    }
+    rest.start(restSeconds);
+    try {
+      await skipSet({ workoutId, setId });
+    } catch {
+      setSets(snapshot);
+      setActiveSetId(setId);
+      alert("Couldn't skip that set — please try again.");
+    }
+  }
+
+  async function handleSkipExercise(exerciseName: string) {
+    const updated = sets.map((s) =>
+      s.exerciseName === exerciseName && !s.completed
+        ? { ...s, completed: true, actual: null }
+        : s,
+    );
+    const nextActive = updated.find((s) => !s.completed) ?? null;
+
+    const snapshot = sets;
+    const snapshotActive = activeSetId;
+    setSets(updated);
+    setActiveSetId(nextActive?.id ?? null);
+    setOpenSetId(null);
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      next.delete(exerciseName);
+      if (nextActive) next.add(nextActive.exerciseName);
+      return next;
+    });
+    try {
+      await skipExercise({ workoutId, exerciseName });
+    } catch {
+      setSets(snapshot);
+      setActiveSetId(snapshotActive);
+      alert("Couldn't skip that exercise — please try again.");
+    }
+  }
+
+  async function handleRestart() {
+    setSheet(null);
+    rest.skip();
+    try {
+      await restartWorkout(workoutId);
+      // startedAt changed → the page remounts this component with fresh props.
+      startTransition(() => router.refresh());
+    } catch {
+      alert("Couldn't restart the workout — please try again.");
+    }
+  }
+
   async function handleFinish() {
+    setSheet(null);
     rest.skip();
     await completeWorkout(workoutId);
     startTransition(() => router.refresh());
   }
 
   async function handleAbandon() {
-    setConfirmingAbandon(false);
+    setSheet(null);
     rest.skip();
     await abandonWorkout(workoutId);
     router.push("/today");
@@ -330,8 +414,8 @@ export function Session({
               </span>
               <button
                 type="button"
-                onClick={() => setConfirmingAbandon(true)}
-                aria-label="Quit workout"
+                onClick={() => setSheet("menu")}
+                aria-label="Workout options"
                 className="-mr-1 p-1 text-white/60 hover:text-white transition-colors"
               >
                 <MoreHorizontal className="size-5" />
@@ -415,6 +499,7 @@ export function Session({
                             key={s.id}
                             set={s}
                             onCommit={(a) => handleCommit(s.id, a)}
+                            onSkip={() => handleSkipSet(s.id)}
                           />
                         );
                       }
@@ -425,6 +510,15 @@ export function Session({
                         return <ActiveSet key={s.id} set={s} editing onCommit={(a) => handleEdit(s.id, a)} />;
                       return <CompactSetRow key={s.id} set={s} divider={!last} onTap={() => setOpenSetId(s.id)} />;
                     })}
+                    {done < total && (
+                      <button
+                        type="button"
+                        onClick={() => handleSkipExercise(exerciseName)}
+                        className="w-full border-t border-[color:var(--hairline)] px-4 py-2.5 text-center text-xs font-medium text-muted-foreground transition-colors hover:text-foreground"
+                      >
+                        Skip rest of exercise
+                      </button>
+                    )}
                   </div>
                 )}
               </section>
@@ -433,48 +527,107 @@ export function Session({
 
           <button
             type="button"
-            disabled={!allDone || pending}
-            onClick={handleFinish}
+            disabled={completedCount === 0 || pending}
+            onClick={() => (allDone ? handleFinish() : setSheet("finish"))}
             className="mt-4 h-12 w-full rounded-[12px] bg-[var(--teal)] text-white text-sm font-medium transition-opacity disabled:opacity-40"
           >
             {pending
               ? "Saving…"
               : allDone
                 ? "Finish workout"
-                : `Finish (${completedCount}/${sets.length} sets)`}
+                : `Finish early (${completedCount}/${sets.length} sets)`}
           </button>
         </main>
       </div>
 
-      {confirmingAbandon && (
+      {sheet && (
         <div
           className="fixed inset-0 z-50 flex items-end justify-center bg-black/40 px-4 pb-8 animate-in fade-in"
-          onClick={() => setConfirmingAbandon(false)}
+          onClick={() => setSheet(null)}
         >
           <div
             className="w-full max-w-sm rounded-[18px] bg-white p-5 shadow-xl"
             onClick={(e) => e.stopPropagation()}
           >
-            <h3 className="text-base font-semibold text-foreground">Quit this workout?</h3>
-            <p className="mt-1 text-sm text-muted-foreground">
-              Your completed sets are kept. You can pick a workout again anytime.
-            </p>
-            <div className="mt-4 flex gap-2">
-              <button
-                type="button"
-                onClick={() => setConfirmingAbandon(false)}
-                className="h-11 flex-1 rounded-[12px] border-[0.5px] border-[color:var(--hairline)] text-sm font-medium text-foreground"
-              >
-                Keep going
-              </button>
-              <button
-                type="button"
-                onClick={handleAbandon}
-                className="h-11 flex-1 rounded-[12px] bg-[var(--feel-hard-bg)] text-sm font-medium text-[var(--feel-hard-fg)]"
-              >
-                Quit workout
-              </button>
-            </div>
+            {sheet === "menu" && (
+              <>
+                <h3 className="text-base font-semibold text-foreground">Workout options</h3>
+                <div className="mt-4 space-y-2">
+                  <button
+                    type="button"
+                    onClick={() => setSheet("restart")}
+                    className="h-11 w-full rounded-[12px] border-[0.5px] border-[color:var(--hairline)] text-sm font-medium text-foreground"
+                  >
+                    Restart workout
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleAbandon}
+                    className="h-11 w-full rounded-[12px] bg-[var(--feel-hard-bg)] text-sm font-medium text-[var(--feel-hard-fg)]"
+                  >
+                    Quit workout
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setSheet(null)}
+                    className="h-11 w-full rounded-[12px] text-sm font-medium text-muted-foreground"
+                  >
+                    Keep going
+                  </button>
+                </div>
+              </>
+            )}
+
+            {sheet === "restart" && (
+              <>
+                <h3 className="text-base font-semibold text-foreground">Restart this workout?</h3>
+                <p className="mt-1 text-sm text-muted-foreground">
+                  All logged sets will be cleared and the clock starts over.
+                </p>
+                <div className="mt-4 flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setSheet(null)}
+                    className="h-11 flex-1 rounded-[12px] border-[0.5px] border-[color:var(--hairline)] text-sm font-medium text-foreground"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleRestart}
+                    className="h-11 flex-1 rounded-[12px] bg-[var(--feel-hard-bg)] text-sm font-medium text-[var(--feel-hard-fg)]"
+                  >
+                    Restart
+                  </button>
+                </div>
+              </>
+            )}
+
+            {sheet === "finish" && (
+              <>
+                <h3 className="text-base font-semibold text-foreground">Finish early?</h3>
+                <p className="mt-1 text-sm text-muted-foreground">
+                  {sets.length - completedCount} set{sets.length - completedCount === 1 ? "" : "s"} left
+                  — they&apos;ll show as skipped in your summary.
+                </p>
+                <div className="mt-4 flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setSheet(null)}
+                    className="h-11 flex-1 rounded-[12px] border-[0.5px] border-[color:var(--hairline)] text-sm font-medium text-foreground"
+                  >
+                    Keep going
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleFinish}
+                    className="h-11 flex-1 rounded-[12px] bg-[var(--teal)] text-sm font-medium text-white"
+                  >
+                    Finish workout
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         </div>
       )}
@@ -592,6 +745,7 @@ function CalculatingNext() {
 
 function CompactSetRow({ set, divider, onTap }: { set: SessionSet; divider: boolean; onTap?: () => void }) {
   const done = set.completed && set.actual;
+  const skipped = set.completed && !set.actual;
   const inner = (
     <>
       <span className="flex items-center gap-2 font-normal text-muted-foreground">
@@ -601,7 +755,9 @@ function CompactSetRow({ set, divider, onTap }: { set: SessionSet; divider: bool
       <span className="flex items-center gap-2 tabular-nums text-muted-foreground">
         {done
           ? `${set.actual!.reps} × ${set.actual!.weight} lbs`
-          : `${set.prescribed.reps} × ${set.prescribed.weight} lbs`}
+          : skipped
+            ? "Skipped"
+            : `${set.prescribed.reps} × ${set.prescribed.weight} lbs`}
         {done && (
           <span
             aria-hidden
@@ -643,10 +799,12 @@ function ActiveSet({
   set,
   editing,
   onCommit,
+  onSkip,
 }: {
   set: SessionSet;
   editing?: boolean;
   onCommit: (actual: Actual) => Promise<void>;
+  onSkip?: () => void;
 }) {
   // String-backed so typing is intuitive: no forced leading zeros, can be
   // briefly empty, and focusing selects the whole value to overwrite.
@@ -742,6 +900,17 @@ function ActiveSet({
         <FeelChip label="Okay" feeling="yellow" submitting={submitting} onPick={commit} />
         <FeelChip label="Easy" feeling="green" submitting={submitting} onPick={commit} />
       </div>
+
+      {onSkip && !editing && (
+        <button
+          type="button"
+          disabled={submitting !== null}
+          onClick={onSkip}
+          className="mt-3 w-full text-center text-xs font-medium text-muted-foreground transition-colors hover:text-foreground disabled:opacity-60"
+        >
+          Skip this set
+        </button>
+      )}
     </div>
   );
 }

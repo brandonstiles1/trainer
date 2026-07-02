@@ -102,6 +102,8 @@ export default async function WorkoutPage({ params }: { params: Promise<{ id: st
 
   return (
     <Session
+      // Restart resets startedAt — remount so client state rebuilds from fresh props.
+      key={workout.startedAt.getTime()}
       workoutId={id}
       dayName={workout.dayKey}
       initialSets={sets}

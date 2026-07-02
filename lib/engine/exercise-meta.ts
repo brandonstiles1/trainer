@@ -17,10 +17,12 @@ export const ISOLATION_REP_RANGE: RepRange = { min: 10, max: 15 };
 export const COMPOUND_REST_SECONDS = 150; // 2–3 min
 export const ISOLATION_REST_SECONDS = 75; // 60–90 s
 
+// Machine default is 5 (half-plate/cable steps): 10-lb rounding is coarser than
+// the ±15% clamp band at light weights and can bounce a cut back to the old load.
 const DEFAULT_INCREMENT: Record<ExerciseType, number> = {
   barbell: 5,
   dumbbell: 5,
-  machine: 10,
+  machine: 5,
   bodyweight: 5,
 };
 

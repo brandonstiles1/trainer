@@ -3,7 +3,8 @@
 import { useCallback, useEffect, useMemo, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { ChevronDown, ChevronRight, MoreHorizontal, Check, Clock, Timer } from "lucide-react";
-import { adaptChain, type Feeling } from "@/lib/adapt";
+import type { Feeling } from "@/lib/adapt";
+import { recomputeWorkoutRows, type StoredPrescribed } from "@/lib/workouts/engine-adapter";
 import {
   commitSet,
   editSet,
@@ -21,14 +22,14 @@ export type SessionSet = {
   id: string;
   exerciseName: string;
   setNumber: number;
-  prescribed: { reps: number; weight: number; targetReps: number; rationale?: string };
+  prescribed: StoredPrescribed;
   completed: boolean;
   actual: { reps: number; weight: number; feeling: Feeling } | null;
 };
 
 type Actual = { reps: number; weight: number; feeling: Feeling };
 
-// Feels like the app is "computing" the next set even though adaptChain is instant.
+// Feels like the app is "computing" the next set even though the engine is instant.
 const CALCULATING_MS = 850;
 
 const titleCase = (s: string) =>
@@ -153,22 +154,28 @@ function useRestTimer(workoutId: string) {
   };
 }
 
-function applyAdaptChain(
+/** Client-side engine mirror: identical pure recompute to the server's. */
+function applyEngine(
   sets: SessionSet[],
-  exerciseName: string,
-  baselineFloors: Record<string, number>,
+  baselines: Record<string, number | null>,
+  bodyweightLbs?: number,
 ): SessionSet[] {
-  const exerciseSets = sets
-    .filter((s) => s.exerciseName === exerciseName)
-    .sort((a, b) => a.setNumber - b.setNumber);
-  const adapted = adaptChain(
-    exerciseSets.map((s) => ({ prescribed: s.prescribed, actual: s.actual })),
-    baselineFloors[exerciseName] ?? 0,
-  );
-  return sets.map((s) => {
-    const i = exerciseSets.findIndex((e) => e.id === s.id);
-    return i === -1 ? s : { ...s, prescribed: adapted[i].prescribed };
+  const { changed } = recomputeWorkoutRows({
+    rows: sets.map((s) => ({
+      id: s.id,
+      exerciseName: s.exerciseName,
+      setNumber: s.setNumber,
+      prescribed: s.prescribed,
+      actual: s.actual,
+      resolved: s.completed,
+    })),
+    // Sets arrive plan-ordered from the page; first appearance preserves it.
+    exerciseOrder: [...new Set(sets.map((s) => s.exerciseName))],
+    baselines,
+    bodyweightLbs,
   });
+  const byId = new Map(changed.map((c) => [c.id, c.prescribed]));
+  return sets.map((s) => (byId.has(s.id) ? { ...s, prescribed: byId.get(s.id)! } : s));
 }
 
 export function Session({
@@ -177,14 +184,16 @@ export function Session({
   initialSets,
   restSeconds,
   startedAtMs,
-  baselineFloors,
+  baselines,
+  bodyweightLbs,
 }: {
   workoutId: string;
   dayName: string;
   initialSets: SessionSet[];
   restSeconds: number;
   startedAtMs: number;
-  baselineFloors: Record<string, number>;
+  baselines: Record<string, number | null>;
+  bodyweightLbs?: number;
 }) {
   const router = useRouter();
   const [sets, setSets] = useState(initialSets);
@@ -249,8 +258,8 @@ export function Session({
       s.id === setId ? { ...s, completed: true, actual } : s,
     );
 
-    // Rebuild this exercise's chain client-side for instant feedback (mirrors server).
-    updated = applyAdaptChain(updated, current.exerciseName, baselineFloors);
+    // Re-run the engine client-side for instant feedback (mirrors the server).
+    updated = applyEngine(updated, baselines, bodyweightLbs);
 
     const nextActive = next ?? updated.find((s) => !s.completed && s.id !== setId) ?? null;
 
@@ -290,8 +299,7 @@ export function Session({
     const snapshot = sets;
     // Logging any set (including one not yet reached) marks it complete and re-flows downstream.
     let updated = sets.map((s) => (s.id === setId ? { ...s, actual, completed: true } : s));
-    const target = updated.find((s) => s.id === setId)!;
-    updated = applyAdaptChain(updated, target.exerciseName, baselineFloors);
+    updated = applyEngine(updated, baselines, bodyweightLbs);
     setSets(updated);
     setOpenSetId(null);
     try {
@@ -317,8 +325,10 @@ export function Session({
     if (idx === -1) return;
     const current = sets[idx];
 
-    const updated = sets.map((s) =>
-      s.id === setId ? { ...s, completed: true, actual: null } : s,
+    const updated = applyEngine(
+      sets.map((s) => (s.id === setId ? { ...s, completed: true, actual: null } : s)),
+      baselines,
+      bodyweightLbs,
     );
     const nextActive =
       updated.find(
@@ -345,10 +355,14 @@ export function Session({
   }
 
   async function handleSkipExercise(exerciseName: string) {
-    const updated = sets.map((s) =>
-      s.exerciseName === exerciseName && !s.completed
-        ? { ...s, completed: true, actual: null }
-        : s,
+    const updated = applyEngine(
+      sets.map((s) =>
+        s.exerciseName === exerciseName && !s.completed
+          ? { ...s, completed: true, actual: null }
+          : s,
+      ),
+      baselines,
+      bodyweightLbs,
     );
     const nextActive = updated.find((s) => !s.completed) ?? null;
 
@@ -842,7 +856,9 @@ function ActiveSet({
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-1">
           <p className="text-[11px] font-normal uppercase tracking-wide text-muted-foreground">
-            Set {set.setNumber} · prescribed {set.prescribed.reps} × {set.prescribed.weight}
+            {set.prescribed.amrap
+              ? `Set ${set.setNumber} · AMRAP at ${set.prescribed.weight} lbs`
+              : `Set ${set.setNumber} · prescribed ${set.prescribed.reps} × ${set.prescribed.weight}`}
           </p>
           {set.prescribed.rationale && (
             <button

@@ -1,53 +1,8 @@
 export type Feeling = "red" | "yellow" | "green";
 export type Actual = { reps: number; weight: number; feeling: Feeling };
-export type Prescribed = {
-  reps: number;
-  weight: number;
-  targetReps: number;
-  rationale?: string;
-};
-export type AdaptSet = { prescribed: Prescribed; actual: Actual | null };
 
-/** Rep buffer (RIR) applied to the NEXT set based on how the previous set felt. Tunable. */
-const BUFFER: Record<Feeling, number> = {
-  yellow: 2,
-  // green=0 (not 1): an easy set makes Epley UNDER-estimate true 1RM, so the
-  // projection already bakes in real-world reps-in-reserve — no extra buffer
-  // needed. (Also, with 5-lb rounding green=1 would tie with yellow.)
-  green: 0,
-  red: 3,
-};
-
-/**
- * Recompute the prescribed weight for every set after the first, from the
- * ORDERED chain of actuals. Pure — returns a new array, never mutates input.
- * A set is only recomputed when its immediate predecessor has been logged.
- * Editing any set and re-running this re-flows all sets after it.
- */
-export function adaptChain(sets: AdaptSet[], baselineFloor = 0): AdaptSet[] {
-  return sets.map((set, i) => {
-    if (i === 0) return set; // seed (set 1) is authoritative
-    const prev = sets[i - 1].actual;
-    if (!prev) return set; // predecessor not logged → leave seed value
-    if (!Number.isFinite(prev.weight) || !Number.isFinite(prev.reps)) return set;
-    const e1rm = estimate1RM(prev.weight, prev.reps);
-    const buffer = BUFFER[prev.feeling];
-    const targetReps = set.prescribed.targetReps;
-    const raw = weightForReps(e1rm, targetReps + buffer);
-    const weight = Math.max(baselineFloor, roundToStep(raw));
-    return {
-      ...set,
-      prescribed: {
-        ...set.prescribed,
-        reps: targetReps,
-        weight,
-        rationale: `Prior set ${prev.reps}×${prev.weight} ≈ ${Math.round(
-          e1rm,
-        )} est. 1RM; targeting ${targetReps} reps → ${weight}`,
-      },
-    };
-  });
-}
+// In-workout adaptation lives in lib/engine (autoregulate) via
+// lib/workouts/engine-adapter; this module keeps the shared Epley math.
 
 /** Estimated one-rep max (Epley). */
 export function estimate1RM(weight: number, reps: number): number {

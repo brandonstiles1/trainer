@@ -2,7 +2,8 @@ import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import { db } from "@/lib/db";
 import { workouts, workoutSets, profiles, plans, liftEstimates } from "@/lib/db/schema";
-import { and, asc, eq, inArray } from "drizzle-orm";
+import { and, asc, desc, eq, inArray } from "drizzle-orm";
+import { estimate1RM } from "@/lib/adapt";
 import { Session, type SessionSet } from "./session";
 import { Summary } from "@/components/workout/summary";
 
@@ -66,38 +67,47 @@ export default async function WorkoutPage({ params }: { params: Promise<{ id: st
   }
 
   const sets: SessionSet[] = sortedRows.map((r) => {
-    const p = r.prescribed as {
-      reps: number; weight: number; targetReps?: number; rationale?: string;
-    };
+    const p = r.prescribed as SessionSet["prescribed"];
     return {
       id: r.id,
       exerciseName: r.exerciseName,
       setNumber: r.setNumber,
-      prescribed: { reps: p.reps, weight: p.weight, targetReps: p.targetReps ?? p.reps, rationale: p.rationale },
+      prescribed: { ...p, targetReps: p.targetReps ?? p.reps },
       completed: r.completedAt !== null,
       actual: r.actual as SessionSet["actual"],
     };
   });
 
-  const [profile] = await db.select({ rest: profiles.restTimerSeconds }).from(profiles).where(eq(profiles.userId, user.id)).limit(1);
+  const [profile] = await db
+    .select({ rest: profiles.restTimerSeconds, weightLbs: profiles.weightLbs })
+    .from(profiles)
+    .where(eq(profiles.userId, user.id))
+    .limit(1);
   const restSeconds = profile?.rest ?? 75;
 
+  // Latest lift estimate per exercise (any source) → baseline e1RM for the
+  // client-side engine mirror. Mirrors latestBaselines in lib/actions/workouts.
   const exerciseNames = [...new Set(sets.map((s) => s.exerciseName))];
-  const pins = exerciseNames.length
+  const estimates = exerciseNames.length
     ? await db
-        .select({ exerciseName: liftEstimates.exerciseName, weightLbs: liftEstimates.weightLbs })
+        .select({
+          exerciseName: liftEstimates.exerciseName,
+          weightLbs: liftEstimates.weightLbs,
+          reps: liftEstimates.reps,
+        })
         .from(liftEstimates)
         .where(
           and(
             eq(liftEstimates.userId, user.id),
-            eq(liftEstimates.source, "user_pinned"),
             inArray(liftEstimates.exerciseName, exerciseNames),
           ),
         )
+        .orderBy(desc(liftEstimates.recordedAt))
     : [];
-  const baselineFloors: Record<string, number> = {};
-  for (const p of pins) {
-    baselineFloors[p.exerciseName] = Math.max(baselineFloors[p.exerciseName] ?? 0, p.weightLbs);
+  const baselines: Record<string, number | null> = {};
+  for (const name of exerciseNames) baselines[name] = null;
+  for (const e of estimates) {
+    if (baselines[e.exerciseName] === null) baselines[e.exerciseName] = estimate1RM(e.weightLbs, e.reps);
   }
 
   return (
@@ -109,7 +119,8 @@ export default async function WorkoutPage({ params }: { params: Promise<{ id: st
       initialSets={sets}
       restSeconds={restSeconds}
       startedAtMs={workout.startedAt.getTime()}
-      baselineFloors={baselineFloors}
+      baselines={baselines}
+      bodyweightLbs={profile?.weightLbs ?? undefined}
     />
   );
 }

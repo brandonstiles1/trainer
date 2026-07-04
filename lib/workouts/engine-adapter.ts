@@ -60,6 +60,8 @@ export function recomputeWorkoutRows(
     exerciseOrder: string[];
     baselines: Record<string, number | null | undefined>;
     bodyweightLbs?: number;
+    /** Per-exercise plate-increment overrides (user gym preference). */
+    increments?: Record<string, number | undefined>;
   },
   config: EngineConfig = defaultEngineConfig,
 ): RecomputeResult {
@@ -90,7 +92,9 @@ export function recomputeWorkoutRows(
     const logical = [...logged, ...unresolved];
     unresolvedByName.set(name, unresolved);
 
-    const meta = inferExerciseMeta(name);
+    const inferred = inferExerciseMeta(name);
+    const increment = input.increments?.[name];
+    const meta = increment ? { ...inferred, weightIncrement: increment } : inferred;
     const addedBw = meta.type === "bodyweight" ? (input.bodyweightLbs ?? 0) : 0;
     exercises.push({
       name,

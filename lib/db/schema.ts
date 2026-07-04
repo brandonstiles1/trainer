@@ -3,11 +3,13 @@ import {
   uuid,
   integer,
   smallint,
+  real,
   text,
   timestamp,
   boolean,
   jsonb,
   pgEnum,
+  primaryKey,
 } from "drizzle-orm/pg-core";
 
 // ────────── enums ──────────
@@ -83,10 +85,25 @@ export const workoutSets = pgTable("workout_sets", {
   workoutId: uuid("workout_id").notNull(),
   exerciseName: text("exercise_name").notNull(),
   setNumber: smallint("set_number").notNull(),
+  // Position of the exercise within the workout; survives mid-workout swaps
+  // (rows predating the column are all 0 and fall back to plan-day order).
+  exerciseOrder: smallint("exercise_order").notNull().default(0),
   prescribed: jsonb("prescribed").notNull(),
   actual: jsonb("actual"),
   completedAt: timestamp("completed_at", { withTimezone: true }),
 });
+
+export const exercisePreferences = pgTable(
+  "exercise_preferences",
+  {
+    userId: uuid("user_id").notNull(),
+    exerciseName: text("exercise_name").notNull(),
+    /** Smallest load step available for this exercise in the user's gym (lbs). */
+    weightIncrement: real("weight_increment").notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.userId, t.exerciseName] })],
+);
 
 export const photos = pgTable("photos", {
   id: uuid("id").primaryKey().defaultRandom(),

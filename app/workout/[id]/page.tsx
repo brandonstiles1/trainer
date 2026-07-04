@@ -1,7 +1,7 @@
 import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import { db } from "@/lib/db";
-import { workouts, workoutSets, profiles, plans, liftEstimates } from "@/lib/db/schema";
+import { workouts, workoutSets, profiles, plans, liftEstimates, exercisePreferences } from "@/lib/db/schema";
 import { and, asc, desc, eq, inArray } from "drizzle-orm";
 import { estimate1RM } from "@/lib/adapt";
 import { Session, type SessionSet } from "./session";
@@ -49,7 +49,10 @@ export default async function WorkoutPage({ params }: { params: Promise<{ id: st
       exerciseOrder.set(ex.name, ex.order);
     }
   }
+  // exercise_order wins (it survives mid-workout swaps); rows predating the
+  // column are all 0 and fall through to plan-day order.
   const sortedRows = [...rows].sort((a, b) => {
+    if (a.exerciseOrder !== b.exerciseOrder) return a.exerciseOrder - b.exerciseOrder;
     const ao = exerciseOrder.get(a.exerciseName) ?? 999;
     const bo = exerciseOrder.get(b.exerciseName) ?? 999;
     if (ao !== bo) return ao - bo;
@@ -110,10 +113,27 @@ export default async function WorkoutPage({ params }: { params: Promise<{ id: st
     if (baselines[e.exerciseName] === null) baselines[e.exerciseName] = estimate1RM(e.weightLbs, e.reps);
   }
 
+  const prefs = exerciseNames.length
+    ? await db
+        .select({
+          exerciseName: exercisePreferences.exerciseName,
+          weightIncrement: exercisePreferences.weightIncrement,
+        })
+        .from(exercisePreferences)
+        .where(
+          and(
+            eq(exercisePreferences.userId, user.id),
+            inArray(exercisePreferences.exerciseName, exerciseNames),
+          ),
+        )
+    : [];
+  const increments = Object.fromEntries(prefs.map((p) => [p.exerciseName, p.weightIncrement]));
+
   return (
     <Session
-      // Restart resets startedAt — remount so client state rebuilds from fresh props.
-      key={workout.startedAt.getTime()}
+      // Restart resets startedAt and a swap changes the exercise list — remount
+      // on either so client state rebuilds from fresh props.
+      key={`${workout.startedAt.getTime()}:${exerciseNames.join("|")}`}
       workoutId={id}
       dayName={workout.dayKey}
       initialSets={sets}
@@ -121,6 +141,7 @@ export default async function WorkoutPage({ params }: { params: Promise<{ id: st
       startedAtMs={workout.startedAt.getTime()}
       baselines={baselines}
       bodyweightLbs={profile?.weightLbs ?? undefined}
+      initialIncrements={increments}
     />
   );
 }

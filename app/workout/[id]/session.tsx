@@ -2,9 +2,21 @@
 
 import { useCallback, useEffect, useMemo, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
-import { ChevronDown, ChevronRight, MoreHorizontal, Check, Clock, Timer } from "lucide-react";
+import {
+  ChevronDown,
+  ChevronRight,
+  MoreHorizontal,
+  Check,
+  Clock,
+  Timer,
+  Pause,
+  Play,
+  RefreshCw,
+} from "lucide-react";
 import type { Feeling } from "@/lib/adapt";
 import { recomputeWorkoutRows, type StoredPrescribed } from "@/lib/workouts/engine-adapter";
+import { inferExerciseMeta } from "@/lib/engine/infer-meta";
+import { alternativesFor } from "@/lib/workouts/exercise-alternatives";
 import {
   commitSet,
   editSet,
@@ -14,6 +26,8 @@ import {
   skipSet,
   skipExercise,
   restartWorkout,
+  setExerciseIncrement,
+  swapExercise,
 } from "./actions";
 import { isBigJump } from "@/lib/workouts/pin-trigger";
 import { formatDuration } from "@/lib/format";
@@ -44,16 +58,59 @@ const feelColor: Record<Feeling, string> = {
   green: "var(--teal)",
 };
 
-// Timestamp-based so it stays correct across re-renders, navigation and lock/unlock.
-function useElapsed(startMs: number) {
+const WEIGHT_INCREMENTS = [2.5, 5, 10];
+
+type PauseState = { pausedAtMs: number | null; totalPausedMs: number };
+
+/** Timestamp-based count-up clock with pause/resume, persisted to localStorage
+ *  so it stays correct across re-renders, navigation, reload and lock/unlock. */
+function usePausableClock(startMs: number, workoutId: string) {
+  const storageKey = `trainer:pause:${workoutId}:${startMs}`;
+  const [pause, setPause] = useState<PauseState>({ pausedAtMs: null, totalPausedMs: 0 });
   const [now, setNow] = useState(startMs);
+
+  // Resume persisted pause state post-mount (hydration-safe, like useRestTimer).
+  useEffect(() => {
+    const resume = () => {
+      try {
+        const raw = localStorage.getItem(storageKey);
+        if (raw) setPause(JSON.parse(raw) as PauseState);
+      } catch {
+        /* ignore */
+      }
+    };
+    const id = setTimeout(resume, 0);
+    return () => clearTimeout(id);
+  }, [storageKey]);
+
   useEffect(() => {
     const tick = () => setNow(Date.now());
     tick();
     const id = setInterval(tick, 1000);
     return () => clearInterval(id);
   }, []);
-  return Math.max(0, Math.floor((now - startMs) / 1000));
+
+  const toggle = useCallback(() => {
+    setPause((prev) => {
+      const next: PauseState =
+        prev.pausedAtMs !== null
+          ? { pausedAtMs: null, totalPausedMs: prev.totalPausedMs + (Date.now() - prev.pausedAtMs) }
+          : { pausedAtMs: Date.now(), totalPausedMs: prev.totalPausedMs };
+      try {
+        if (next.pausedAtMs === null && next.totalPausedMs === 0)
+          localStorage.removeItem(storageKey);
+        else localStorage.setItem(storageKey, JSON.stringify(next));
+      } catch {
+        /* storage unavailable — pause still works in-memory */
+      }
+      return next;
+    });
+  }, [storageKey]);
+
+  const paused = pause.pausedAtMs !== null;
+  const frozenNow = paused ? pause.pausedAtMs! : now;
+  const elapsed = Math.max(0, Math.floor((frozenNow - startMs - pause.totalPausedMs) / 1000));
+  return { elapsed, paused, toggle };
 }
 
 type RestState = { endsAt: number; durationMs: number };
@@ -158,7 +215,8 @@ function useRestTimer(workoutId: string) {
 function applyEngine(
   sets: SessionSet[],
   baselines: Record<string, number | null>,
-  bodyweightLbs?: number,
+  bodyweightLbs: number | undefined,
+  increments: Record<string, number>,
 ): SessionSet[] {
   const { changed } = recomputeWorkoutRows({
     rows: sets.map((s) => ({
@@ -173,6 +231,7 @@ function applyEngine(
     exerciseOrder: [...new Set(sets.map((s) => s.exerciseName))],
     baselines,
     bodyweightLbs,
+    increments,
   });
   const byId = new Map(changed.map((c) => [c.id, c.prescribed]));
   return sets.map((s) => (byId.has(s.id) ? { ...s, prescribed: byId.get(s.id)! } : s));
@@ -186,6 +245,7 @@ export function Session({
   startedAtMs,
   baselines,
   bodyweightLbs,
+  initialIncrements,
 }: {
   workoutId: string;
   dayName: string;
@@ -194,6 +254,7 @@ export function Session({
   startedAtMs: number;
   baselines: Record<string, number | null>;
   bodyweightLbs?: number;
+  initialIncrements: Record<string, number>;
 }) {
   const router = useRouter();
   const [sets, setSets] = useState(initialSets);
@@ -203,6 +264,10 @@ export function Session({
   const [calculatingSetId, setCalculatingSetId] = useState<string | null>(null);
   const [openSetId, setOpenSetId] = useState<string | null>(null);
   const [pinPrompt, setPinPrompt] = useState<{ exerciseName: string; weight: number; reps: number } | null>(null);
+  const [increments, setIncrements] = useState(initialIncrements);
+  // Exercise whose swap picker is open.
+  const [swapFor, setSwapFor] = useState<string | null>(null);
+  const [swapping, setSwapping] = useState(false);
   // Bottom sheet: workout menu (restart/quit) or a confirm step reached from it / from Finish.
   const [sheet, setSheet] = useState<"menu" | "restart" | "finish" | null>(null);
   // Manual collapse/expand, independent of which set is active. Start with the
@@ -213,7 +278,7 @@ export function Session({
   });
   const [pending, startTransition] = useTransition();
 
-  const elapsed = useElapsed(startedAtMs);
+  const { elapsed, paused, toggle: togglePause } = usePausableClock(startedAtMs, workoutId);
   const rest = useRestTimer(workoutId);
 
   const completedCount = sets.filter((s) => s.completed).length;
@@ -259,7 +324,7 @@ export function Session({
     );
 
     // Re-run the engine client-side for instant feedback (mirrors the server).
-    updated = applyEngine(updated, baselines, bodyweightLbs);
+    updated = applyEngine(updated, baselines, bodyweightLbs, increments);
 
     const nextActive = next ?? updated.find((s) => !s.completed && s.id !== setId) ?? null;
 
@@ -299,7 +364,7 @@ export function Session({
     const snapshot = sets;
     // Logging any set (including one not yet reached) marks it complete and re-flows downstream.
     let updated = sets.map((s) => (s.id === setId ? { ...s, actual, completed: true } : s));
-    updated = applyEngine(updated, baselines, bodyweightLbs);
+    updated = applyEngine(updated, baselines, bodyweightLbs, increments);
     setSets(updated);
     setOpenSetId(null);
     try {
@@ -310,11 +375,11 @@ export function Session({
     }
   }
 
-  async function handlePin() {
+  async function handlePin(weight: number, reps: number) {
     const p = pinPrompt;
     setPinPrompt(null);
     try {
-      await pinBaseline({ exerciseName: p!.exerciseName, weightLbs: p!.weight, reps: p!.reps });
+      await pinBaseline({ exerciseName: p!.exerciseName, weightLbs: weight, reps });
     } catch {
       alert("Couldn't pin that baseline.");
     }
@@ -329,6 +394,7 @@ export function Session({
       sets.map((s) => (s.id === setId ? { ...s, completed: true, actual: null } : s)),
       baselines,
       bodyweightLbs,
+      increments,
     );
     const nextActive =
       updated.find(
@@ -363,6 +429,7 @@ export function Session({
       ),
       baselines,
       bodyweightLbs,
+      increments,
     );
     const nextActive = updated.find((s) => !s.completed) ?? null;
 
@@ -383,6 +450,32 @@ export function Session({
       setSets(snapshot);
       setActiveSetId(snapshotActive);
       alert("Couldn't skip that exercise — please try again.");
+    }
+  }
+
+  function handleIncrementChange(exerciseName: string, increment: number) {
+    const next = { ...increments, [exerciseName]: increment };
+    setIncrements(next);
+    setSets((prev) => applyEngine(prev, baselines, bodyweightLbs, next));
+    setExerciseIncrement({ workoutId, exerciseName, increment }).catch(() => {
+      alert("Couldn't save that weight step — it will apply for this session only.");
+    });
+  }
+
+  async function handleSwap(toExercise: string) {
+    const fromExercise = swapFor;
+    if (!fromExercise) return;
+    setSwapping(true);
+    try {
+      await swapExercise({ workoutId, fromExercise, toExercise });
+      // The page keys this component on the exercise list — refresh remounts
+      // with the swapped-in exercise's fresh prescription and baseline.
+      startTransition(() => router.refresh());
+      setSwapFor(null);
+    } catch {
+      alert("Couldn't swap that exercise — please try again.");
+    } finally {
+      setSwapping(false);
     }
   }
 
@@ -422,10 +515,15 @@ export function Session({
               {titleCase(dayName)} day
             </p>
             <div className="flex items-center gap-3">
-              <span className="flex items-center gap-1.5 text-sm font-medium tabular-nums text-white">
-                <Clock className="size-3.5 text-white/55" />
-                {formatDuration(elapsed)}
-              </span>
+              <button
+                type="button"
+                onClick={togglePause}
+                aria-label={paused ? "Resume workout" : "Pause workout"}
+                className="flex items-center gap-1.5 rounded-full bg-white/15 px-2.5 py-1 text-[11px] font-medium text-white transition-colors hover:bg-white/25"
+              >
+                {paused ? <Play className="size-3.5" /> : <Pause className="size-3.5" />}
+                {paused ? "Resume" : "Pause"}
+              </button>
               <button
                 type="button"
                 onClick={() => setSheet("menu")}
@@ -450,37 +548,31 @@ export function Session({
               onSkip={rest.skip}
             />
           ) : (
-            <div className="mt-2.5 flex items-center gap-3.5">
-              <Stat label="Exercises" value={String(byExercise.length)} />
-              <span className="h-3 w-px bg-white/20" />
-              <Stat label="Sets" value={`${completedCount}/${sets.length}`} />
+            <div className="mt-2.5 flex items-center justify-between">
+              <div className="flex items-center gap-3.5">
+                <Stat label="Exercises" value={String(byExercise.length)} />
+                <span className="h-3 w-px bg-white/20" />
+                <Stat label="Sets" value={`${completedCount}/${sets.length}`} />
+              </div>
+              <span
+                className={`flex items-center gap-1.5 text-sm font-medium tabular-nums ${
+                  paused ? "text-white/50" : "text-white"
+                }`}
+              >
+                <Clock className="size-3.5 text-white/55" />
+                {formatDuration(elapsed)}
+                {paused && (
+                  <span className="text-[10px] font-medium uppercase tracking-wide text-white/60">
+                    paused
+                  </span>
+                )}
+              </span>
             </div>
           )}
         </header>
 
         {/* ── Exercise cards ── */}
         <main className="px-4 py-4 space-y-3 pb-28">
-          {pinPrompt && (
-            <div className="mx-4 mb-3 rounded-[12px] border-[0.5px] border-[var(--teal)]/40 bg-[var(--teal)]/5 p-3">
-              <p className="text-sm font-medium text-[var(--teal)]">Big jump — pin {pinPrompt.weight} lbs?</p>
-              <p className="mt-1 text-[11px] text-[var(--teal)]/80">
-                Future {titleCase(pinPrompt.exerciseName)} workouts will start from here.
-              </p>
-              <div className="mt-2 flex gap-2">
-                <button
-                  type="button"
-                  onClick={handlePin}
-                  className="h-9 flex-1 rounded-[10px] bg-[var(--teal)] text-xs font-medium text-white"
-                >Pin baseline</button>
-                <button
-                  type="button"
-                  onClick={() => setPinPrompt(null)}
-                  className="h-9 flex-1 rounded-[10px] border-[0.5px] border-[color:var(--hairline)] text-xs font-medium text-muted-foreground"
-                >Not now</button>
-              </div>
-            </div>
-          )}
-
           {byExercise.map(([exerciseName, exerciseSets]) => {
             const done = exerciseSets.filter((s) => s.completed).length;
             const total = exerciseSets.length;
@@ -501,17 +593,23 @@ export function Session({
                   expanded={isExpanded}
                   isActive={isActive}
                   onTap={() => toggleExpanded(exerciseName)}
+                  onSwap={done < total ? () => setSwapFor(exerciseName) : undefined}
                 />
 
                 {isExpanded && (
                   <div className="border-t border-[color:var(--hairline)]">
                     {exerciseSets.map((s, i) => {
                       const last = i === exerciseSets.length - 1;
+                      const increment =
+                        increments[s.exerciseName] ??
+                        inferExerciseMeta(s.exerciseName).weightIncrement;
                       if (s.id === activeSetId) {
                         return (
                           <ActiveSet
                             key={s.id}
                             set={s}
+                            increment={increment}
+                            onIncrementChange={(inc) => handleIncrementChange(s.exerciseName, inc)}
                             onCommit={(a) => handleCommit(s.id, a)}
                             onSkip={() => handleSkipSet(s.id)}
                           />
@@ -521,7 +619,16 @@ export function Session({
                         return <CalculatingNext key={s.id} />;
                       }
                       if (s.id === openSetId)
-                        return <ActiveSet key={s.id} set={s} editing onCommit={(a) => handleEdit(s.id, a)} />;
+                        return (
+                          <ActiveSet
+                            key={s.id}
+                            set={s}
+                            editing
+                            increment={increment}
+                            onIncrementChange={(inc) => handleIncrementChange(s.exerciseName, inc)}
+                            onCommit={(a) => handleEdit(s.id, a)}
+                          />
+                        );
                       return <CompactSetRow key={s.id} set={s} divider={!last} onTap={() => setOpenSetId(s.id)} />;
                     })}
                     {done < total && (
@@ -553,6 +660,61 @@ export function Session({
           </button>
         </main>
       </div>
+
+      {swapFor && (
+        <div
+          className="fixed inset-0 z-50 flex items-end justify-center bg-black/40 px-4 pb-8 animate-in fade-in"
+          onClick={() => !swapping && setSwapFor(null)}
+        >
+          <div
+            className="w-full max-w-sm rounded-[18px] bg-white p-5 shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 className="text-base font-semibold text-foreground">
+              Swap {titleCase(swapFor)}
+            </h3>
+            <p className="mt-1 text-sm text-muted-foreground">
+              Remaining sets are replaced and prescribed from the new exercise&apos;s own numbers.
+            </p>
+            <div className="mt-4 max-h-72 space-y-2 overflow-y-auto">
+              {alternativesFor(swapFor, sets.map((s) => s.exerciseName)).map((alt) => (
+                <button
+                  key={alt}
+                  type="button"
+                  disabled={swapping}
+                  onClick={() => handleSwap(alt)}
+                  className="h-11 w-full rounded-[12px] border-[0.5px] border-[color:var(--hairline)] text-sm font-medium text-foreground transition-colors hover:border-[var(--teal)] disabled:opacity-60"
+                >
+                  {titleCase(alt)}
+                </button>
+              ))}
+              {alternativesFor(swapFor, sets.map((s) => s.exerciseName)).length === 0 && (
+                <p className="py-4 text-center text-sm text-muted-foreground">
+                  No similar exercises to suggest.
+                </p>
+              )}
+            </div>
+            <button
+              type="button"
+              disabled={swapping}
+              onClick={() => setSwapFor(null)}
+              className="mt-3 h-11 w-full rounded-[12px] text-sm font-medium text-muted-foreground disabled:opacity-60"
+            >
+              {swapping ? "Swapping…" : "Keep it"}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {pinPrompt && (
+        <PinBaselineDialog
+          exerciseName={pinPrompt.exerciseName}
+          initialWeight={pinPrompt.weight}
+          initialReps={pinPrompt.reps}
+          onPin={handlePin}
+          onDismiss={() => setPinPrompt(null)}
+        />
+      )}
 
       {sheet && (
         <div
@@ -649,6 +811,106 @@ export function Session({
   );
 }
 
+function PinBaselineDialog({
+  exerciseName,
+  initialWeight,
+  initialReps,
+  onPin,
+  onDismiss,
+}: {
+  exerciseName: string;
+  initialWeight: number;
+  initialReps: number;
+  onPin: (weight: number, reps: number) => void;
+  onDismiss: () => void;
+}) {
+  const [weight, setWeight] = useState(String(initialWeight));
+  const [reps, setReps] = useState(String(initialReps));
+
+  const weightNum = Math.max(0, Number(weight) || 0);
+  const repsNum = Math.max(0, Math.round(Number(reps) || 0));
+  const valid = weightNum > 0 && repsNum > 0;
+
+  const onRepsChange = (e: React.ChangeEvent<HTMLInputElement>) =>
+    setReps(e.target.value.replace(/[^\d]/g, "").slice(0, 2));
+
+  const onWeightChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    let v = e.target.value.replace(/[^\d.]/g, "");
+    const dot = v.indexOf(".");
+    if (dot !== -1) v = v.slice(0, dot + 1) + v.slice(dot + 1).replace(/\./g, "");
+    setWeight(v.slice(0, 6));
+  };
+
+  const numberField =
+    "w-full h-14 rounded-[12px] border-[0.5px] border-[color:var(--hairline)] bg-[#fafaf9] text-center text-2xl font-medium text-foreground outline-none transition-colors focus:border-[var(--teal)] focus:ring-2 focus:ring-[var(--teal)]/15";
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4 animate-in fade-in"
+      onClick={onDismiss}
+    >
+      <div
+        className="w-full max-w-sm rounded-[18px] bg-white p-5 shadow-xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <h3 className="text-base font-semibold text-foreground">
+          Big jump — pin a new baseline?
+        </h3>
+        <p className="mt-1 text-sm text-muted-foreground">
+          Future {titleCase(exerciseName)} workouts will start from here. Adjust if needed.
+        </p>
+
+        <div className="mt-4 grid grid-cols-2 gap-3">
+          <label className="block">
+            <span className="block text-center text-[11px] font-normal uppercase tracking-wide text-muted-foreground">
+              Reps
+            </span>
+            <input
+              type="text"
+              inputMode="numeric"
+              value={reps}
+              onChange={onRepsChange}
+              onFocus={(e) => e.target.select()}
+              className={`mt-1.5 ${numberField}`}
+            />
+          </label>
+          <label className="block">
+            <span className="block text-center text-[11px] font-normal uppercase tracking-wide text-muted-foreground">
+              Weight (lbs)
+            </span>
+            <input
+              type="text"
+              inputMode="decimal"
+              value={weight}
+              onChange={onWeightChange}
+              onFocus={(e) => e.target.select()}
+              className={`mt-1.5 ${numberField}`}
+            />
+          </label>
+        </div>
+
+        <div className="mt-4 flex gap-2">
+          <button
+            type="button"
+            onClick={onDismiss}
+            className="h-11 flex-1 rounded-[12px] border-[0.5px] border-[color:var(--hairline)] text-sm font-medium text-muted-foreground"
+          >
+            Not now
+          </button>
+          <button
+            type="button"
+            disabled={!valid}
+            onClick={() => onPin(weightNum, repsNum)}
+            className="h-11 flex-1 rounded-[12px] bg-[var(--teal)] text-sm font-medium text-white transition-opacity disabled:opacity-40"
+          >
+            Pin baseline
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function Stat({ label, value }: { label: string; value: string }) {
   return (
     <div className="flex items-baseline gap-1.5">
@@ -709,6 +971,7 @@ function ExerciseHeader({
   expanded,
   isActive,
   onTap,
+  onSwap,
 }: {
   name: string;
   done: number;
@@ -717,13 +980,23 @@ function ExerciseHeader({
   expanded: boolean;
   isActive: boolean;
   onTap: () => void;
+  onSwap?: () => void;
 }) {
+  // A div-with-button-role, not a <button>: the swap control nests inside and
+  // interactive elements must not contain each other.
   return (
-    <button
-      type="button"
+    <div
+      role="button"
+      tabIndex={0}
       onClick={onTap}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onTap();
+        }
+      }}
       aria-expanded={expanded}
-      className="w-full flex items-center justify-between gap-3 px-4 py-3 text-left"
+      className="w-full flex cursor-pointer items-center justify-between gap-3 px-4 py-3 text-left"
     >
       <div className="min-w-0">
         <h2 className="flex items-center gap-2 text-base font-medium text-foreground">
@@ -731,6 +1004,19 @@ function ExerciseHeader({
             <span aria-hidden className="size-1.5 shrink-0 rounded-full bg-[var(--teal)]" />
           )}
           <span className="truncate">{titleCase(name)}</span>
+          {onSwap && (
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                onSwap();
+              }}
+              aria-label={`Swap ${titleCase(name)} for a similar exercise`}
+              className="p-1 text-muted-foreground/60 transition-colors hover:text-[var(--teal)]"
+            >
+              <RefreshCw className="size-3.5" />
+            </button>
+          )}
         </h2>
         <p className="mt-0.5 text-xs font-normal text-muted-foreground tabular-nums">
           {done} of {total} sets · {lead.prescribed.reps} × {lead.prescribed.weight} lbs
@@ -741,7 +1027,7 @@ function ExerciseHeader({
           expanded ? "rotate-180" : ""
         }`}
       />
-    </button>
+    </div>
   );
 }
 
@@ -812,11 +1098,15 @@ function CompactSetRow({ set, divider, onTap }: { set: SessionSet; divider: bool
 function ActiveSet({
   set,
   editing,
+  increment,
+  onIncrementChange,
   onCommit,
   onSkip,
 }: {
   set: SessionSet;
   editing?: boolean;
+  increment: number;
+  onIncrementChange: (increment: number) => void;
   onCommit: (actual: Actual) => Promise<void>;
   onSkip?: () => void;
 }) {
@@ -905,6 +1195,17 @@ function ActiveSet({
             onFocus={(e) => e.target.select()}
             className={`mt-1.5 ${numberField}`}
           />
+          <button
+            type="button"
+            onClick={() => {
+              const i = WEIGHT_INCREMENTS.indexOf(increment);
+              onIncrementChange(WEIGHT_INCREMENTS[(i + 1) % WEIGHT_INCREMENTS.length]);
+            }}
+            aria-label={`Weight steps: ${increment} lbs — tap to change`}
+            className="mt-1.5 w-full text-center text-[11px] font-medium text-muted-foreground transition-colors hover:text-[var(--teal)]"
+          >
+            steps of {increment} lbs
+          </button>
         </label>
       </div>
 

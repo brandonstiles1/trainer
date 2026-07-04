@@ -24,6 +24,8 @@ export type PrescribeExerciseInput = {
   weeklyHardSetsForGroup: number;
   consecutiveEasySessions: number;
   bodyweightLbs?: number;
+  /** Plate-increment override for this exercise (user gym preference). */
+  weightIncrement?: number;
 };
 
 export type NewSetRow = { setNumber: number; prescribed: StoredPrescribed };
@@ -37,7 +39,10 @@ export function prescribeExercise(
   input: PrescribeExerciseInput,
   config: EngineConfig = defaultEngineConfig,
 ): NewSetRow[] {
-  const meta = inferExerciseMeta(input.name);
+  const inferred = inferExerciseMeta(input.name);
+  const meta = input.weightIncrement
+    ? { ...inferred, weightIncrement: input.weightIncrement }
+    : inferred;
   const midReps = Math.floor((meta.repRange.min + meta.repRange.max) / 2);
 
   // No usable history (or just deloaded — volume and intensity reset): let the

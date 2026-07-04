@@ -3,7 +3,7 @@
 import { after } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { db } from "@/lib/db";
-import { plans, profiles, workouts, workoutSets, liftEstimates } from "@/lib/db/schema";
+import { plans, profiles, workouts, workoutSets, liftEstimates, exercisePreferences } from "@/lib/db/schema";
 import { and, asc, desc, eq, gte, inArray, isNotNull, isNull } from "drizzle-orm";
 import { estimate1RM, weightForReps, type Actual } from "@/lib/adapt";
 import { feelFromFeeling } from "@/lib/engine/config";
@@ -174,6 +174,27 @@ async function latestBaselines(
   return baselines;
 }
 
+/** Per-exercise plate-increment preferences (user's gym equipment). */
+async function exerciseIncrements(
+  userId: string,
+  exerciseNames: string[],
+): Promise<Record<string, number>> {
+  if (exerciseNames.length === 0) return {};
+  const rows = await db
+    .select({
+      exerciseName: exercisePreferences.exerciseName,
+      weightIncrement: exercisePreferences.weightIncrement,
+    })
+    .from(exercisePreferences)
+    .where(
+      and(
+        eq(exercisePreferences.userId, userId),
+        inArray(exercisePreferences.exerciseName, exerciseNames),
+      ),
+    );
+  return Object.fromEntries(rows.map((r) => [r.exerciseName, r.weightIncrement]));
+}
+
 async function bodyweightFor(userId: string): Promise<number | undefined> {
   const [profile] = await db
     .select({ weightLbs: profiles.weightLbs })
@@ -241,6 +262,7 @@ async function recomputeAfter(params: {
     exerciseOrder: await planExerciseOrder(workout.planId, workout.dayKey),
     baselines: await latestBaselines(params.userId, exerciseNames),
     bodyweightLbs: await bodyweightFor(params.userId),
+    increments: await exerciseIncrements(params.userId, exerciseNames),
   });
 
   await db.transaction(async (tx) => {
@@ -399,6 +421,7 @@ export async function completeWorkout(workoutId: string): Promise<void> {
     exerciseOrder: await planExerciseOrder(updated.planId, updated.dayKey),
     baselines: await latestBaselines(user.id, exerciseNames),
     bodyweightLbs: await bodyweightFor(user.id),
+    increments: await exerciseIncrements(user.id, exerciseNames),
   });
 
   const inserts = states
@@ -417,6 +440,93 @@ export async function completeWorkout(workoutId: string): Promise<void> {
   if (inserts.length > 0) {
     await db.insert(liftEstimates).values(inserts);
   }
+}
+
+/**
+ * Save the user's plate-increment preference for one exercise, then re-flow the
+ * current workout's remaining prescriptions onto the new step.
+ */
+export async function setExerciseIncrement(input: {
+  workoutId: string;
+  exerciseName: string;
+  increment: number;
+}): Promise<void> {
+  const supabase = await createClient();
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) throw new Error("not signed in");
+  if (![2.5, 5, 10].includes(input.increment)) throw new Error("unsupported increment");
+
+  await db
+    .insert(exercisePreferences)
+    .values({
+      userId: user.id,
+      exerciseName: input.exerciseName,
+      weightIncrement: input.increment,
+    })
+    .onConflictDoUpdate({
+      target: [exercisePreferences.userId, exercisePreferences.exerciseName],
+      set: { weightIncrement: input.increment, updatedAt: new Date() },
+    });
+
+  // The preference is already saved; the reflow just rewrites prescriptions.
+  await recomputeAfter({
+    workoutId: input.workoutId,
+    userId: user.id,
+    mutate: () => {},
+    persistMutation: async () => {},
+  });
+}
+
+/**
+ * Replace an exercise's remaining sets with a similar exercise, prescribed
+ * from the new exercise's own baseline (calibration ramp if it has none).
+ * Logged sets of the outgoing exercise stay in the workout's history.
+ */
+export async function swapExercise(input: {
+  workoutId: string;
+  fromExercise: string;
+  toExercise: string;
+}): Promise<void> {
+  const supabase = await createClient();
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) throw new Error("not signed in");
+
+  const [workout] = await db
+    .select({ userId: workouts.userId, status: workouts.status })
+    .from(workouts)
+    .where(eq(workouts.id, input.workoutId))
+    .limit(1);
+  if (!workout || workout.userId !== user.id) throw new Error("workout not found");
+  if (workout.status !== "in_progress") throw new Error("workout is not in progress");
+
+  const rows = await db
+    .select({
+      id: workoutSets.id,
+      exerciseName: workoutSets.exerciseName,
+      exerciseOrder: workoutSets.exerciseOrder,
+      completedAt: workoutSets.completedAt,
+    })
+    .from(workoutSets)
+    .where(eq(workoutSets.workoutId, input.workoutId));
+
+  if (rows.some((r) => r.exerciseName === input.toExercise))
+    throw new Error("exercise already in this workout");
+  const fromRows = rows.filter((r) => r.exerciseName === input.fromExercise);
+  const unresolvedIds = fromRows.filter((r) => r.completedAt === null).map((r) => r.id);
+  if (fromRows.length === 0 || unresolvedIds.length === 0)
+    throw new Error("nothing left to swap");
+
+  const prescribed = await prescribeWorkoutSetRows(user.id, [input.toExercise]);
+  const newRows = prescribed.map((r) => ({
+    ...r,
+    workoutId: input.workoutId,
+    exerciseOrder: fromRows[0].exerciseOrder, // keep the outgoing exercise's slot
+  }));
+
+  await db.transaction(async (tx) => {
+    await tx.delete(workoutSets).where(inArray(workoutSets.id, unresolvedIds));
+    await tx.insert(workoutSets).values(newRows as (typeof workoutSets.$inferInsert)[]);
+  });
 }
 
 export async function abandonWorkout(workoutId: string): Promise<void> {
@@ -439,9 +549,12 @@ export async function abandonWorkout(workoutId: string): Promise<void> {
 async function prescribeWorkoutSetRows(
   userId: string,
   exerciseNames: string[],
-): Promise<Array<{ exerciseName: string; setNumber: number; prescribed: StoredPrescribed }>> {
+): Promise<
+  Array<{ exerciseName: string; setNumber: number; exerciseOrder: number; prescribed: StoredPrescribed }>
+> {
   const baselines = await latestBaselines(userId, exerciseNames);
   const bodyweightLbs = await bodyweightFor(userId);
+  const increments = await exerciseIncrements(userId, exerciseNames);
 
   // Rolling 7-day hard-set volume per muscle group, from logged sets.
   const weekAgo = new Date(Date.now() - 7 * 86_400_000);
@@ -501,7 +614,12 @@ async function prescribeWorkoutSetRows(
         .orderBy(asc(liftEstimates.recordedAt))
     : [];
 
-  const out: Array<{ exerciseName: string; setNumber: number; prescribed: StoredPrescribed }> = [];
+  const out: Array<{
+    exerciseName: string;
+    setNumber: number;
+    exerciseOrder: number;
+    prescribed: StoredPrescribed;
+  }> = [];
   for (const name of exerciseNames) {
     // Group this exercise's history rows into sessions (workouts), newest first.
     const sessions: Array<{ sets: SessionSetLog[]; wasDeload: boolean }> = [];
@@ -550,8 +668,11 @@ async function prescribeWorkoutSetRows(
       weeklyHardSetsForGroup,
       consecutiveEasySessions,
       bodyweightLbs,
+      weightIncrement: increments[name],
     });
-    out.push(...rows.map((r) => ({ exerciseName: name, ...r })));
+    out.push(
+      ...rows.map((r) => ({ exerciseName: name, exerciseOrder: exerciseNames.indexOf(name), ...r })),
+    );
   }
   return out;
 }
@@ -601,6 +722,7 @@ export async function adjustTodayWorkout(params: {
       ? (await prescribeWorkoutSetRows(userId, diff.exercisesToGenerate)).map((r) => ({
           workoutId: inProgress.id,
           ...r,
+          exerciseOrder: newExercises.indexOf(r.exerciseName),
         }))
       : [];
 

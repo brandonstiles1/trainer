@@ -8,6 +8,8 @@ import {
   skipSet as skipSetImpl,
   skipExercise as skipExerciseImpl,
   restartWorkout as restartWorkoutImpl,
+  setExerciseIncrement as setExerciseIncrementImpl,
+  swapExercise as swapExerciseImpl,
 } from "@/lib/actions/workouts";
 import type { CommitSetInput } from "@/lib/actions/workouts";
 import { pinBaseline as pinBaselineImpl } from "@/lib/actions/lift-estimates";
@@ -35,4 +37,18 @@ export async function skipExercise(input: { workoutId: string; exerciseName: str
 }
 export async function restartWorkout(workoutId: string) {
   return restartWorkoutImpl(workoutId);
+}
+export async function setExerciseIncrement(input: {
+  workoutId: string;
+  exerciseName: string;
+  increment: number;
+}) {
+  return setExerciseIncrementImpl(input);
+}
+export async function swapExercise(input: {
+  workoutId: string;
+  fromExercise: string;
+  toExercise: string;
+}) {
+  return swapExerciseImpl(input);
 }

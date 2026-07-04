@@ -183,7 +183,7 @@ function runExercise(params: {
 
   for (let j = done.length; j < ex.sets.length; j++) {
     const planned = ex.sets[j];
-    const reps = clampReps(planned.targetReps, ex.meta.repRange);
+    let reps = clampReps(planned.targetReps, ex.meta.repRange);
     const isConfirmation = recal !== null && !recal.confirmed && j === done.length && last !== null;
     let weight: number;
     let reason: string;
@@ -194,21 +194,32 @@ function runExercise(params: {
       rir = 2;
       const totalRaw = loadFor(fresh * projFactor, reps, rir);
       weight = boundAdded(roundToStep(totalRaw - bw, inc), ex.meta);
-      reason = `${last.weight}×${last.reps} @ ${last.feel} implies ~${Math.round(
+      reason = `${last.weight}×${last.reps} felt ${last.feel}, suggesting ~${Math.round(
         recal.candidateE1rm,
-      )} max — confirm with ${weight}×${reps} (~2 RIR) before saving the new baseline`;
+      )} max. Confirm with ${weight}×${reps} (leaving 2–3 reps) before we save it.`;
     } else {
-      let totalRaw = (fresh * projFactor * probeMult * readiness) / (1 + (reps + rir) / 30);
-      if (j === 0 && setOffset === 0) totalRaw *= probe.conservativeFactor;
+      let target = fresh * projFactor * probeMult * readiness;
+      if (j === 0 && setOffset === 0) target *= probe.conservativeFactor;
+      const totalRaw = target / (1 + (reps + rir) / 30);
       weight = boundAdded(prescribeWithinBand(totalRaw, refTotal, bw, inc, config.clampPct), ex.meta);
-      const readinessNote = readiness < 1 ? ` (readiness ×${readiness.toFixed(2)})` : "";
+      // Coarse increments can round the load back up past the target (or a
+      // needed cut can round to no change at all); trim reps so the set still
+      // lands near the intended RIR instead of silently getting harder.
+      const total = bw + weight;
+      if (total > 0) {
+        const achievable = Math.round(30 * (target / total - 1) - rir);
+        if (achievable < reps) reps = clampReps(achievable, ex.meta.repRange);
+      }
+      const rirLabel =
+        rir === 0.5 ? "0–1 reps (very close to max)" : rir <= 2.5 ? "2–3 reps" : "4+ reps";
+      const readinessNote = readiness < 1 ? ` You're a bit fatigued today.` : "";
       reason = last
-        ? `${last.weight}×${last.reps} @ ${last.feel} implies ~${Math.round(
+        ? `${last.weight}×${last.reps} felt ${last.feel}. Your estimated max: ~${Math.round(
             fresh,
-          )} max, so ${weight}×${reps} leaves ~${rir} reps in reserve${readinessNote}`
-        : `Opening probe: baseline ~${Math.round(
+          )} lbs. So ${weight}×${reps} should leave ${rirLabel} for next time.${readinessNote}`
+        : `Starting at ~${Math.round(
             baseline,
-          )} max → ${weight}×${reps} (~${rir} RIR), kept slightly conservative${readinessNote}`;
+          )} lbs max. This first set is slightly conservative: ${weight}×${reps}, leaving ${rirLabel}.${readinessNote}`;
     }
 
     prescriptions.push({ exerciseName: ex.name, setNumber: setOffset + j + 1, weight, reps, reason });

@@ -40,7 +40,9 @@ describe("the real cable-fly session: hard failure now cuts the load (no pinned 
     const [set2, set3] = result.changed;
     expect(set2.prescribed.weight).toBe(35); // clamped to −15% of the logged 40
     expect(set3.prescribed.weight).toBe(30);
-    expect(set2.prescribed.reps).toBe(12);
+    // The clamp holds the load above the ideal cut, so reps trim to the
+    // rep-range floor to keep the set near the RIR target.
+    expect(set2.prescribed.reps).toBe(10);
   });
 
   it("flags readiness and barely moves the baseline", () => {
@@ -141,5 +143,55 @@ describe("minimal diff contract", () => {
       baselines: { bench_press: 100 },
     });
     expect(result.changed.every((c) => c.id === rows[1].id)).toBe(true);
+  });
+});
+
+describe("per-exercise increment override", () => {
+  it("rounds prescriptions to the overridden step and trims reps when forced up", () => {
+    const rows = [
+      row("machine_chest_press", 1, { reps: 10, weight: 65 }, { reps: 10, weight: 65, feeling: "yellow" }),
+      row("machine_chest_press", 2, { reps: 10, weight: 65 }),
+    ];
+    const withDefault = recomputeWorkoutRows({
+      rows,
+      exerciseOrder: ["machine_chest_press"],
+      baselines: { machine_chest_press: 95 },
+    });
+    const withTens = recomputeWorkoutRows({
+      rows,
+      exerciseOrder: ["machine_chest_press"],
+      baselines: { machine_chest_press: 95 },
+      increments: { machine_chest_press: 10 },
+    });
+    for (const c of withTens.changed) {
+      expect(c.prescribed.weight % 10).toBe(0);
+    }
+    // When the coarser step lands the load above the finer prescription, the
+    // reps come down to compensate — never a strictly harder set.
+    const fine = withDefault.changed[0];
+    const coarse = withTens.changed[0];
+    if (fine && coarse && coarse.prescribed.weight > fine.prescribed.weight) {
+      expect(coarse.prescribed.reps).toBeLessThanOrEqual(fine.prescribed.reps);
+    }
+  });
+});
+
+describe("rep compensation at light weights", () => {
+  it("a hard isolation set at a weight too light to step down trims the next set's reps", () => {
+    // 15 lb curls: a 3–5% cut is under one 5 lb plate step, so the weight
+    // rounds back to 15 — the reps must absorb the adjustment instead.
+    const baseline = 15 * (1 + 14 / 30); // 12 reps at RIR 2 exactly on target
+    const rows = [
+      row("dumbbell_curl", 1, { reps: 12, weight: 15 }, { reps: 12, weight: 15, feeling: "red" }),
+      row("dumbbell_curl", 2, { reps: 12, weight: 15 }),
+    ];
+    const result = recomputeWorkoutRows({
+      rows,
+      exerciseOrder: ["dumbbell_curl"],
+      baselines: { dumbbell_curl: baseline },
+    });
+    const set2 = result.changed.find((c) => c.id === rows[1].id);
+    expect(set2).toBeDefined();
+    expect(set2!.prescribed.reps).toBeLessThan(12);
   });
 });

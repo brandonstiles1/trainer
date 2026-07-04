@@ -67,6 +67,13 @@ create policy "photos: user owns"
   with check (user_id = auth.uid());
 
 -- ============================================
+-- ---------- exercise_preferences ----------
+alter table public.exercise_preferences enable row level security;
+create policy "exercise_preferences: user owns"
+  on public.exercise_preferences for all
+  using (user_id = auth.uid())
+  with check (user_id = auth.uid());
+
 -- Auto-create profile row on auth.users insert.
 -- ============================================
 create or replace function public.handle_new_user()

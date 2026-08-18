@@ -74,6 +74,13 @@ create policy "exercise_preferences: user owns"
   using (user_id = auth.uid())
   with check (user_id = auth.uid());
 
+-- ---------- weekly_reviews ----------
+alter table public.weekly_reviews enable row level security;
+create policy "weekly_reviews: user owns"
+  on public.weekly_reviews for all
+  using (user_id = auth.uid())
+  with check (user_id = auth.uid());
+
 -- Auto-create profile row on auth.users insert.
 -- ============================================
 create or replace function public.handle_new_user()

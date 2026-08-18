@@ -1,35 +1,54 @@
 import { z } from "zod";
 
+/**
+ * The weekly review is commentary and nothing else. It reads the week and says
+ * something useful about it; it does not set, suggest, or nudge a number. Every
+ * target the app shows comes from the log book via `lib/engine/progression`,
+ * and this tool has no way to reach it — deliberately.
+ */
 export const reviewResponseSchema = z.object({
-  updates: z.array(z.object({
-    exercise_name: z.string().regex(/^[a-z0-9_]+$/),
-    weight_lbs: z.number().nonnegative(),
-    reps: z.number().int().min(1),
-    reason: z.string().min(1).max(200),
-  })),
+  headline: z.string().min(1).max(200),
+  observations: z
+    .array(
+      z.object({
+        /** The exercise it's about, or null for the week as a whole. */
+        exercise_name: z.string().regex(/^[a-z0-9_]+$/).nullable(),
+        note: z.string().min(1).max(300),
+      }),
+    )
+    .max(6),
 });
 export type ReviewResponse = z.infer<typeof reviewResponseSchema>;
 
 export const submitReviewTool = {
   name: "submit_review",
-  description: "Submit baseline updates after reviewing the week. Call exactly once.",
+  description:
+    "Submit your written review of the past week. Commentary only — never prescribe weights, reps, or sets. Call exactly once.",
   input_schema: {
     type: "object",
     properties: {
-      updates: {
+      headline: {
+        type: "string",
+        maxLength: 200,
+        description: "One sentence on how the week went.",
+      },
+      observations: {
         type: "array",
+        maxItems: 6,
         items: {
           type: "object",
-          required: ["exercise_name", "weight_lbs", "reps", "reason"],
+          required: ["exercise_name", "note"],
           properties: {
-            exercise_name: { type: "string", pattern: "^[a-z0-9_]+$" },
-            weight_lbs: { type: "number", minimum: 0 },
-            reps: { type: "integer", minimum: 1 },
-            reason: { type: "string", maxLength: 200 },
+            exercise_name: {
+              type: ["string", "null"],
+              pattern: "^[a-z0-9_]+$",
+              description: "The exercise this is about, or null for the week as a whole.",
+            },
+            note: { type: "string", maxLength: 300 },
           },
         },
       },
     },
-    required: ["updates"],
+    required: ["headline", "observations"],
   },
 } as const;

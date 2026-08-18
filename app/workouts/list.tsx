@@ -3,6 +3,7 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { ChevronDown, MoreHorizontal } from "lucide-react";
 import { deleteWorkout } from "@/lib/actions/workout-history";
+import { WeeklyReviewCard, type WeeklyReviewNote } from "@/components/workout/weekly-review-card";
 
 type Item = {
   id: string; dayKey: string; status: string; startedAt: string;
@@ -10,7 +11,13 @@ type Item = {
 };
 const titleCase = (s: string) => s.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 
-export function WorkoutsList({ items }: { items: Item[] }) {
+export function WorkoutsList({
+  items,
+  review,
+}: {
+  items: Item[];
+  review: WeeklyReviewNote | null;
+}) {
   const router = useRouter();
   const [open, setOpen] = useState<Set<string>>(() => new Set(items[0] ? [items[0].id] : []));
   const [menu, setMenu] = useState<string | null>(null);
@@ -35,6 +42,11 @@ export function WorkoutsList({ items }: { items: Item[] }) {
   return (
     <main className="px-4 py-6 max-w-md mx-auto pb-24">
       <h1 className="px-1 text-2xl font-bold">Workouts</h1>
+      {review && (
+        <div className="mt-4">
+          <WeeklyReviewCard review={review} />
+        </div>
+      )}
       <div className="mt-4 space-y-3">
         {items.map((w) => {
           const isOpen = open.has(w.id);

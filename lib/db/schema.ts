@@ -116,6 +116,23 @@ export const exercisePreferences = pgTable(
   (t) => [primaryKey({ columns: [t.userId, t.exerciseName] })],
 );
 
+/**
+ * The coach's read on a week of training. Commentary only — nothing here feeds
+ * back into the numbers, which come from the log book alone
+ * (`lib/engine/progression`).
+ */
+export const weeklyReviews = pgTable("weekly_reviews", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  userId: uuid("user_id").notNull(),
+  /** One sentence on how the week went. */
+  headline: text("headline").notNull(),
+  /** `[{ exerciseName: string | null, note: string }]` — null = about the week as a whole. */
+  observations: jsonb("observations").notNull().default([]),
+  /** Start of the window reviewed; the end is `createdAt`. */
+  periodStart: timestamp("period_start", { withTimezone: true }).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
 export const photos = pgTable("photos", {
   id: uuid("id").primaryKey().defaultRandom(),
   userId: uuid("user_id").notNull(),

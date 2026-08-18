@@ -50,13 +50,36 @@ decide when it earns a bump.
 - stall breaker, auto-deload, auto set-count growth from "easy" sessions
 - the pin-a-baseline dialog and the 850 ms "Calculating next set…" beat
 - writing `lift_estimates` on workout completion
+- the weekly review's ability to write numbers at all (see below)
 
 `lift_estimates` rows survive for one job: a signup answer ("I can bench 185×5")
 seeds the opening load for an exercise the user has never logged. That is the
 only remaining caller of the Epley math in `lib/adapt.ts`.
 
+## The weekly review
+
+Commentary, and structurally nothing else. `submit_review` used to return
+`{ exercise_name, weight_lbs, reps }` triples that were written straight into
+`lift_estimates`; it now returns a headline and up to six observations, each a
+sentence tied to an exercise or to the week as a whole. There is no numeric
+field left in the schema, so the model cannot reach the progression path even
+if it tries — and the prompt tells it the rule is fixed and readable by the
+user, so it shouldn't.
+
+Reviews land in `weekly_reviews` and show as a card at the top of the Workouts
+tab. Before this they were written to `lift_estimates` and displayed nowhere.
+
+It earns its place by seeing what `planNextTargets` can't: that rule looks
+exactly one session back, per exercise. The review reads the whole week and can
+say "curls have been stuck three sessions while you're clearing everything on
+rows" or "you've skipped back work twice."
+
 ## Schema
 
 `exercise_preferences` gains nullable `rep_min` / `rep_max`; `workout_sets`
-gains an index on `exercise_name`, now the hot path. Old `prescribed` payloads
-still read fine — their `amrap` / `calibration` / `deload` flags are inert.
+gains an index on `exercise_name`, now the hot path. New `weekly_reviews` table
+(RLS added in `supabase/policies.sql`). Old `prescribed` payloads still read
+fine — their `amrap` / `calibration` / `deload` flags are inert.
+
+`lift_estimates` keeps its rows and its `user_pinned` enum value for the sake
+of history, but nothing writes either any more.

@@ -8,6 +8,8 @@ import {
   workoutSets,
   photos,
   liftSource,
+  weeklyReviews,
+  exercisePreferences,
 } from "@/lib/db/schema";
 
 describe("db schema", () => {
@@ -40,5 +42,16 @@ describe("schema deltas", () => {
   });
   it("profiles has last_weekly_review_at", () => {
     expect(Object.keys(profiles)).toContain("lastWeeklyReviewAt");
+  });
+  it("weekly_reviews stores commentary, not numbers", () => {
+    const cols = Object.keys(weeklyReviews);
+    expect(cols).toContain("headline");
+    expect(cols).toContain("observations");
+    expect(cols).toContain("periodStart");
+  });
+  it("exercise_preferences carries a rep range", () => {
+    const cols = Object.keys(exercisePreferences);
+    expect(cols).toContain("repMin");
+    expect(cols).toContain("repMax");
   });
 });

@@ -29,6 +29,13 @@
       "when": 1787059200000,
       "tag": "0003_wise_logbook",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1787062800000,
+      "tag": "0004_weekly_commentary",
+      "breakpoints": true
     }
   ]
 }

@@ -1,9 +1,10 @@
 import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import { db } from "@/lib/db";
-import { workouts, workoutSets } from "@/lib/db/schema";
+import { workouts, workoutSets, weeklyReviews } from "@/lib/db/schema";
 import { and, desc, eq, inArray, ne } from "drizzle-orm";
 import { summarizeWorkout } from "@/lib/workouts/summarize-workout";
+import type { WeeklyReviewNote } from "@/components/workout/weekly-review-card";
 import { WorkoutsList } from "./list";
 
 export default async function WorkoutsPage() {
@@ -32,5 +33,20 @@ export default async function WorkoutsPage() {
     };
   });
 
-  return <WorkoutsList items={items} />;
+  const [latestReview] = await db
+    .select()
+    .from(weeklyReviews)
+    .where(eq(weeklyReviews.userId, user.id))
+    .orderBy(desc(weeklyReviews.createdAt))
+    .limit(1);
+
+  const review: WeeklyReviewNote | null = latestReview
+    ? {
+        headline: latestReview.headline,
+        observations: latestReview.observations as WeeklyReviewNote["observations"],
+        createdAt: latestReview.createdAt.toISOString(),
+      }
+    : null;
+
+  return <WorkoutsList items={items} review={review} />;
 }

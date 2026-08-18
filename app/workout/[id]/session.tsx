@@ -11,26 +11,32 @@ import {
   Timer,
   Pause,
   Play,
+  Plus,
   RefreshCw,
 } from "lucide-react";
 import type { Feeling } from "@/lib/adapt";
-import { recomputeWorkoutRows, type StoredPrescribed } from "@/lib/workouts/engine-adapter";
-import { inferExerciseMeta } from "@/lib/engine/infer-meta";
+import type { RepRange } from "@/lib/engine/exercise-meta";
+import type { StoredPrescribed } from "@/lib/workouts/stored-set";
+import { setsToCarryWeight } from "@/lib/workouts/carry-weight";
 import { alternativesFor } from "@/lib/workouts/exercise-alternatives";
 import {
   commitSet,
   editSet,
   completeWorkout,
   abandonWorkout,
-  pinBaseline,
   skipSet,
   skipExercise,
+  addSet,
+  removeSet,
   restartWorkout,
   setExerciseIncrement,
+  setExerciseRepRange,
   swapExercise,
 } from "./actions";
-import { isBigJump } from "@/lib/workouts/pin-trigger";
+import { ExerciseInfoSheet, type ExerciseInfo } from "./exercise-info-sheet";
 import { formatDuration } from "@/lib/format";
+
+export type { ExerciseInfo };
 
 export type SessionSet = {
   id: string;
@@ -43,9 +49,6 @@ export type SessionSet = {
 
 type Actual = { reps: number; weight: number; feeling: Feeling };
 
-// Feels like the app is "computing" the next set even though the engine is instant.
-const CALCULATING_MS = 850;
-
 const titleCase = (s: string) =>
   s.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 
@@ -57,8 +60,6 @@ const feelColor: Record<Feeling, string> = {
   yellow: "var(--feel-okay-fg)",
   green: "var(--teal)",
 };
-
-const WEIGHT_INCREMENTS = [2.5, 5, 10];
 
 type PauseState = { pausedAtMs: number | null; totalPausedMs: number };
 
@@ -211,30 +212,26 @@ function useRestTimer(workoutId: string) {
   };
 }
 
-/** Client-side engine mirror: identical pure recompute to the server's. */
-function applyEngine(
-  sets: SessionSet[],
-  baselines: Record<string, number | null>,
-  bodyweightLbs: number | undefined,
-  increments: Record<string, number>,
-): SessionSet[] {
-  const { changed } = recomputeWorkoutRows({
-    rows: sets.map((s) => ({
-      id: s.id,
-      exerciseName: s.exerciseName,
-      setNumber: s.setNumber,
-      prescribed: s.prescribed,
-      actual: s.actual,
-      resolved: s.completed,
-    })),
-    // Sets arrive plan-ordered from the page; first appearance preserves it.
-    exerciseOrder: [...new Set(sets.map((s) => s.exerciseName))],
-    baselines,
-    bodyweightLbs,
-    increments,
-  });
-  const byId = new Map(changed.map((c) => [c.id, c.prescribed]));
-  return sets.map((s) => (byId.has(s.id) ? { ...s, prescribed: byId.get(s.id)! } : s));
+/**
+ * Client mirror of the server's one downstream effect: later sets of the same
+ * exercise follow the load actually lifted.
+ */
+function carryWeight(sets: SessionSet[], logged: SessionSet, weight: number): SessionSet[] {
+  const ids = new Set(
+    setsToCarryWeight(
+      sets.map((s) => ({
+        id: s.id,
+        exerciseName: s.exerciseName,
+        setNumber: s.setNumber,
+        resolved: s.completed || s.id === logged.id,
+        targetWeight: s.prescribed.weight,
+      })),
+      { exerciseName: logged.exerciseName, setNumber: logged.setNumber, weight },
+    ),
+  );
+  return sets.map((s) =>
+    ids.has(s.id) ? { ...s, prescribed: { ...s.prescribed, weight } } : s,
+  );
 }
 
 export function Session({
@@ -243,28 +240,23 @@ export function Session({
   initialSets,
   restSeconds,
   startedAtMs,
-  baselines,
-  bodyweightLbs,
-  initialIncrements,
+  exerciseInfo,
 }: {
   workoutId: string;
   dayName: string;
   initialSets: SessionSet[];
   restSeconds: number;
   startedAtMs: number;
-  baselines: Record<string, number | null>;
-  bodyweightLbs?: number;
-  initialIncrements: Record<string, number>;
+  exerciseInfo: Record<string, ExerciseInfo>;
 }) {
   const router = useRouter();
   const [sets, setSets] = useState(initialSets);
+  const [info, setInfo] = useState(exerciseInfo);
+  const [infoFor, setInfoFor] = useState<string | null>(null);
   const [activeSetId, setActiveSetId] = useState<string | null>(
     () => initialSets.find((s) => !s.completed)?.id ?? null,
   );
-  const [calculatingSetId, setCalculatingSetId] = useState<string | null>(null);
   const [openSetId, setOpenSetId] = useState<string | null>(null);
-  const [pinPrompt, setPinPrompt] = useState<{ exerciseName: string; weight: number; reps: number } | null>(null);
-  const [increments, setIncrements] = useState(initialIncrements);
   // Exercise whose swap picker is open.
   const [swapFor, setSwapFor] = useState<string | null>(null);
   const [swapping, setSwapping] = useState(false);
@@ -319,53 +311,40 @@ export function Session({
       (s, i) => i > idx && s.exerciseName === current.exerciseName && !s.completed,
     );
 
-    let updated = sets.map((s) =>
-      s.id === setId ? { ...s, completed: true, actual } : s,
-    );
-
-    // Re-run the engine client-side for instant feedback (mirrors the server).
-    updated = applyEngine(updated, baselines, bodyweightLbs, increments);
+    const logged = sets.map((s) => (s.id === setId ? { ...s, completed: true, actual } : s));
+    const updated = carryWeight(logged, current, actual.weight);
 
     const nextActive = next ?? updated.find((s) => !s.completed && s.id !== setId) ?? null;
 
-    if (isBigJump(current.prescribed.weight, actual.weight)) {
-      setPinPrompt({ exerciseName: current.exerciseName, weight: actual.weight, reps: actual.reps });
-    }
-
     const snapshot = sets;
+    setSets(updated);
+    setOpenSetId(null);
+    setActiveSetId(nextActive?.id ?? null);
+    if (nextActive) {
+      setExpanded((prev) =>
+        prev.has(nextActive.exerciseName) ? prev : new Set(prev).add(nextActive.exerciseName),
+      );
+    }
+    // Anytime "done" is tapped the rest clock starts — even on the workout's last set.
+    rest.start(restSeconds);
+
     try {
-      // Show the "calculating" beat: clear the active form, surface the loader.
-      setSets(updated);
-      setActiveSetId(null);
-      setOpenSetId(null);
-      setCalculatingSetId(setId);
-
-      const minDelay = new Promise<void>((r) => setTimeout(r, CALCULATING_MS));
-      await Promise.all([commitSet({ workoutId, setId, actual }), minDelay]);
-
-      setCalculatingSetId(null);
-      setActiveSetId(nextActive?.id ?? null);
-      if (nextActive) {
-        setExpanded((prev) =>
-          prev.has(nextActive.exerciseName) ? prev : new Set(prev).add(nextActive.exerciseName),
-        );
-      }
-      // Anytime "done" is tapped the rest clock starts — even on the workout's last set.
-      rest.start(restSeconds);
+      await commitSet({ workoutId, setId, actual });
     } catch {
       setSets(snapshot);
-      setCalculatingSetId(null);
       setActiveSetId(setId);
+      rest.skip();
       alert("Couldn't save that set — please try again.");
     }
   }
 
   async function handleEdit(setId: string, actual: Actual) {
     const snapshot = sets;
-    // Logging any set (including one not yet reached) marks it complete and re-flows downstream.
-    let updated = sets.map((s) => (s.id === setId ? { ...s, actual, completed: true } : s));
-    updated = applyEngine(updated, baselines, bodyweightLbs, increments);
-    setSets(updated);
+    const current = sets.find((s) => s.id === setId);
+    if (!current) return;
+    // Logging any set (including one not yet reached) marks it complete.
+    const logged = sets.map((s) => (s.id === setId ? { ...s, actual, completed: true } : s));
+    setSets(carryWeight(logged, current, actual.weight));
     setOpenSetId(null);
     try {
       await editSet({ workoutId, setId, actual });
@@ -375,26 +354,13 @@ export function Session({
     }
   }
 
-  async function handlePin(weight: number, reps: number) {
-    const p = pinPrompt;
-    setPinPrompt(null);
-    try {
-      await pinBaseline({ exerciseName: p!.exerciseName, weightLbs: weight, reps });
-    } catch {
-      alert("Couldn't pin that baseline.");
-    }
-  }
-
   async function handleSkipSet(setId: string) {
     const idx = sets.findIndex((s) => s.id === setId);
     if (idx === -1) return;
     const current = sets[idx];
 
-    const updated = applyEngine(
-      sets.map((s) => (s.id === setId ? { ...s, completed: true, actual: null } : s)),
-      baselines,
-      bodyweightLbs,
-      increments,
+    const updated = sets.map((s) =>
+      s.id === setId ? { ...s, completed: true, actual: null } : s,
     );
     const nextActive =
       updated.find(
@@ -421,15 +387,10 @@ export function Session({
   }
 
   async function handleSkipExercise(exerciseName: string) {
-    const updated = applyEngine(
-      sets.map((s) =>
-        s.exerciseName === exerciseName && !s.completed
-          ? { ...s, completed: true, actual: null }
-          : s,
-      ),
-      baselines,
-      bodyweightLbs,
-      increments,
+    const updated = sets.map((s) =>
+      s.exerciseName === exerciseName && !s.completed
+        ? { ...s, completed: true, actual: null }
+        : s,
     );
     const nextActive = updated.find((s) => !s.completed) ?? null;
 
@@ -454,12 +415,53 @@ export function Session({
   }
 
   function handleIncrementChange(exerciseName: string, increment: number) {
-    const next = { ...increments, [exerciseName]: increment };
-    setIncrements(next);
-    setSets((prev) => applyEngine(prev, baselines, bodyweightLbs, next));
-    setExerciseIncrement({ workoutId, exerciseName, increment }).catch(() => {
-      alert("Couldn't save that weight step — it will apply for this session only.");
+    setInfo((prev) => ({ ...prev, [exerciseName]: { ...prev[exerciseName], weightIncrement: increment } }));
+    setExerciseIncrement({ exerciseName, increment }).catch(() => {
+      alert("Couldn't save that weight step — please try again.");
     });
+  }
+
+  function handleRepRangeChange(exerciseName: string, repRange: RepRange) {
+    setInfo((prev) => ({ ...prev, [exerciseName]: { ...prev[exerciseName], repRange } }));
+    setExerciseRepRange({ exerciseName, ...repRange }).catch(() => {
+      alert("Couldn't save that rep range — please try again.");
+    });
+  }
+
+  async function handleAddSet(exerciseName: string) {
+    try {
+      const created = await addSet({ workoutId, exerciseName });
+      const added: SessionSet = { ...created, exerciseName, completed: false, actual: null };
+      // Splice it in after the exercise's existing sets so display order holds.
+      const lastIdx = sets.findLastIndex((s) => s.exerciseName === exerciseName);
+      setSets([...sets.slice(0, lastIdx + 1), added, ...sets.slice(lastIdx + 1)]);
+      setActiveSetId((prev) => prev ?? added.id);
+    } catch {
+      alert("Couldn't add a set — please try again.");
+    }
+  }
+
+  async function handleRemoveSet(setId: string) {
+    const snapshot = sets;
+    const target = sets.find((s) => s.id === setId);
+    if (!target) return;
+    setSets(
+      sets
+        .filter((s) => s.id !== setId)
+        .map((s) =>
+          s.exerciseName === target.exerciseName && s.setNumber > target.setNumber
+            ? { ...s, setNumber: s.setNumber - 1 }
+            : s,
+        ),
+    );
+    if (activeSetId === setId) setActiveSetId(null);
+    setOpenSetId(null);
+    try {
+      await removeSet({ workoutId, setId });
+    } catch {
+      setSets(snapshot);
+      alert("Couldn't remove that set — please try again.");
+    }
   }
 
   async function handleSwap(toExercise: string) {
@@ -590,9 +592,11 @@ export function Session({
                   done={done}
                   total={total}
                   lead={lead}
+                  note={exerciseSets[0]?.prescribed.rationale}
                   expanded={isExpanded}
                   isActive={isActive}
                   onTap={() => toggleExpanded(exerciseName)}
+                  onInfo={() => setInfoFor(exerciseName)}
                   onSwap={done < total ? () => setSwapFor(exerciseName) : undefined}
                 />
 
@@ -600,46 +604,44 @@ export function Session({
                   <div className="border-t border-[color:var(--hairline)]">
                     {exerciseSets.map((s, i) => {
                       const last = i === exerciseSets.length - 1;
-                      const increment =
-                        increments[s.exerciseName] ??
-                        inferExerciseMeta(s.exerciseName).weightIncrement;
-                      if (s.id === activeSetId) {
+                      // A set can only be dropped while more than one remains.
+                      const onRemove =
+                        !s.completed && total > 1 ? () => handleRemoveSet(s.id) : undefined;
+                      if (s.id === activeSetId || s.id === openSetId) {
                         return (
                           <ActiveSet
                             key={s.id}
                             set={s}
-                            increment={increment}
-                            onIncrementChange={(inc) => handleIncrementChange(s.exerciseName, inc)}
-                            onCommit={(a) => handleCommit(s.id, a)}
-                            onSkip={() => handleSkipSet(s.id)}
+                            editing={s.id !== activeSetId}
+                            onCommit={(a) =>
+                              s.id === activeSetId ? handleCommit(s.id, a) : handleEdit(s.id, a)
+                            }
+                            onSkip={s.id === activeSetId ? () => handleSkipSet(s.id) : undefined}
+                            onRemove={onRemove}
                           />
                         );
                       }
-                      if (s.id === calculatingSetId) {
-                        return <CalculatingNext key={s.id} />;
-                      }
-                      if (s.id === openSetId)
-                        return (
-                          <ActiveSet
-                            key={s.id}
-                            set={s}
-                            editing
-                            increment={increment}
-                            onIncrementChange={(inc) => handleIncrementChange(s.exerciseName, inc)}
-                            onCommit={(a) => handleEdit(s.id, a)}
-                          />
-                        );
                       return <CompactSetRow key={s.id} set={s} divider={!last} onTap={() => setOpenSetId(s.id)} />;
                     })}
-                    {done < total && (
+                    <div className="flex border-t border-[color:var(--hairline)]">
                       <button
                         type="button"
-                        onClick={() => handleSkipExercise(exerciseName)}
-                        className="w-full border-t border-[color:var(--hairline)] px-4 py-2.5 text-center text-xs font-medium text-muted-foreground transition-colors hover:text-foreground"
+                        onClick={() => handleAddSet(exerciseName)}
+                        className="flex flex-1 items-center justify-center gap-1.5 px-4 py-2.5 text-xs font-medium text-muted-foreground transition-colors hover:text-[var(--teal)]"
                       >
-                        Skip rest of exercise
+                        <Plus className="size-3.5" />
+                        Add set
                       </button>
-                    )}
+                      {done < total && (
+                        <button
+                          type="button"
+                          onClick={() => handleSkipExercise(exerciseName)}
+                          className="flex-1 border-l border-[color:var(--hairline)] px-4 py-2.5 text-center text-xs font-medium text-muted-foreground transition-colors hover:text-foreground"
+                        >
+                          Skip rest
+                        </button>
+                      )}
+                    </div>
                   </div>
                 )}
               </section>
@@ -706,13 +708,13 @@ export function Session({
         </div>
       )}
 
-      {pinPrompt && (
-        <PinBaselineDialog
-          exerciseName={pinPrompt.exerciseName}
-          initialWeight={pinPrompt.weight}
-          initialReps={pinPrompt.reps}
-          onPin={handlePin}
-          onDismiss={() => setPinPrompt(null)}
+      {infoFor && info[infoFor] && (
+        <ExerciseInfoSheet
+          exerciseName={infoFor}
+          info={info[infoFor]}
+          onClose={() => setInfoFor(null)}
+          onIncrementChange={(inc) => handleIncrementChange(infoFor, inc)}
+          onRepRangeChange={(range) => handleRepRangeChange(infoFor, range)}
         />
       )}
 
@@ -811,106 +813,6 @@ export function Session({
   );
 }
 
-function PinBaselineDialog({
-  exerciseName,
-  initialWeight,
-  initialReps,
-  onPin,
-  onDismiss,
-}: {
-  exerciseName: string;
-  initialWeight: number;
-  initialReps: number;
-  onPin: (weight: number, reps: number) => void;
-  onDismiss: () => void;
-}) {
-  const [weight, setWeight] = useState(String(initialWeight));
-  const [reps, setReps] = useState(String(initialReps));
-
-  const weightNum = Math.max(0, Number(weight) || 0);
-  const repsNum = Math.max(0, Math.round(Number(reps) || 0));
-  const valid = weightNum > 0 && repsNum > 0;
-
-  const onRepsChange = (e: React.ChangeEvent<HTMLInputElement>) =>
-    setReps(e.target.value.replace(/[^\d]/g, "").slice(0, 2));
-
-  const onWeightChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    let v = e.target.value.replace(/[^\d.]/g, "");
-    const dot = v.indexOf(".");
-    if (dot !== -1) v = v.slice(0, dot + 1) + v.slice(dot + 1).replace(/\./g, "");
-    setWeight(v.slice(0, 6));
-  };
-
-  const numberField =
-    "w-full h-14 rounded-[12px] border-[0.5px] border-[color:var(--hairline)] bg-[#fafaf9] text-center text-2xl font-medium text-foreground outline-none transition-colors focus:border-[var(--teal)] focus:ring-2 focus:ring-[var(--teal)]/15";
-
-  return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4 animate-in fade-in"
-      onClick={onDismiss}
-    >
-      <div
-        className="w-full max-w-sm rounded-[18px] bg-white p-5 shadow-xl"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <h3 className="text-base font-semibold text-foreground">
-          Big jump — pin a new baseline?
-        </h3>
-        <p className="mt-1 text-sm text-muted-foreground">
-          Future {titleCase(exerciseName)} workouts will start from here. Adjust if needed.
-        </p>
-
-        <div className="mt-4 grid grid-cols-2 gap-3">
-          <label className="block">
-            <span className="block text-center text-[11px] font-normal uppercase tracking-wide text-muted-foreground">
-              Reps
-            </span>
-            <input
-              type="text"
-              inputMode="numeric"
-              value={reps}
-              onChange={onRepsChange}
-              onFocus={(e) => e.target.select()}
-              className={`mt-1.5 ${numberField}`}
-            />
-          </label>
-          <label className="block">
-            <span className="block text-center text-[11px] font-normal uppercase tracking-wide text-muted-foreground">
-              Weight (lbs)
-            </span>
-            <input
-              type="text"
-              inputMode="decimal"
-              value={weight}
-              onChange={onWeightChange}
-              onFocus={(e) => e.target.select()}
-              className={`mt-1.5 ${numberField}`}
-            />
-          </label>
-        </div>
-
-        <div className="mt-4 flex gap-2">
-          <button
-            type="button"
-            onClick={onDismiss}
-            className="h-11 flex-1 rounded-[12px] border-[0.5px] border-[color:var(--hairline)] text-sm font-medium text-muted-foreground"
-          >
-            Not now
-          </button>
-          <button
-            type="button"
-            disabled={!valid}
-            onClick={() => onPin(weightNum, repsNum)}
-            className="h-11 flex-1 rounded-[12px] bg-[var(--teal)] text-sm font-medium text-white transition-opacity disabled:opacity-40"
-          >
-            Pin baseline
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 function Stat({ label, value }: { label: string; value: string }) {
   return (
     <div className="flex items-baseline gap-1.5">
@@ -968,22 +870,27 @@ function ExerciseHeader({
   done,
   total,
   lead,
+  note,
   expanded,
   isActive,
   onTap,
+  onInfo,
   onSwap,
 }: {
   name: string;
   done: number;
   total: number;
   lead: SessionSet;
+  /** Why today's target is what it is — carried on the exercise's first set. */
+  note?: string;
   expanded: boolean;
   isActive: boolean;
   onTap: () => void;
+  onInfo: () => void;
   onSwap?: () => void;
 }) {
-  // A div-with-button-role, not a <button>: the swap control nests inside and
-  // interactive elements must not contain each other.
+  // A div-with-button-role, not a <button>: the info and swap controls nest
+  // inside and interactive elements must not contain each other.
   return (
     <div
       role="button"
@@ -1004,6 +911,17 @@ function ExerciseHeader({
             <span aria-hidden className="size-1.5 shrink-0 rounded-full bg-[var(--teal)]" />
           )}
           <span className="truncate">{titleCase(name)}</span>
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              onInfo();
+            }}
+            aria-label={`What I did last time on ${titleCase(name)}`}
+            className="inline-flex size-4 shrink-0 items-center justify-center rounded-full border border-[var(--teal)] text-[10px] font-bold text-[var(--teal)]"
+          >
+            i
+          </button>
           {onSwap && (
             <button
               type="button"
@@ -1019,26 +937,15 @@ function ExerciseHeader({
           )}
         </h2>
         <p className="mt-0.5 text-xs font-normal text-muted-foreground tabular-nums">
-          {done} of {total} sets · {lead.prescribed.reps} × {lead.prescribed.weight} lbs
+          {done} of {total} sets · {lead.prescribed.targetReps} × {lead.prescribed.weight} lbs
         </p>
+        {note && <p className="mt-1 text-[11px] leading-snug text-[var(--teal)]">{note}</p>}
       </div>
       <ChevronDown
         className={`size-5 shrink-0 text-muted-foreground transition-transform ${
           expanded ? "rotate-180" : ""
         }`}
       />
-    </div>
-  );
-}
-
-function CalculatingNext() {
-  return (
-    <div className="flex items-center justify-center gap-2.5 px-4 py-6 text-sm font-normal text-muted-foreground">
-      <span
-        aria-hidden
-        className="size-4 animate-spin rounded-full border-2 border-[var(--teal)]/25 border-t-[var(--teal)]"
-      />
-      Calculating next set…
     </div>
   );
 }
@@ -1057,7 +964,7 @@ function CompactSetRow({ set, divider, onTap }: { set: SessionSet; divider: bool
           ? `${set.actual!.reps} × ${set.actual!.weight} lbs`
           : skipped
             ? "Skipped"
-            : `${set.prescribed.reps} × ${set.prescribed.weight} lbs`}
+            : `${set.prescribed.targetReps} × ${set.prescribed.weight} lbs`}
         {done && (
           <span
             aria-hidden
@@ -1098,24 +1005,22 @@ function CompactSetRow({ set, divider, onTap }: { set: SessionSet; divider: bool
 function ActiveSet({
   set,
   editing,
-  increment,
-  onIncrementChange,
   onCommit,
   onSkip,
+  onRemove,
 }: {
   set: SessionSet;
   editing?: boolean;
-  increment: number;
-  onIncrementChange: (increment: number) => void;
   onCommit: (actual: Actual) => Promise<void>;
   onSkip?: () => void;
+  onRemove?: () => void;
 }) {
   // String-backed so typing is intuitive: no forced leading zeros, can be
-  // briefly empty, and focusing selects the whole value to overwrite.
-  const [reps, setReps] = useState(String((editing ? set.actual?.reps : undefined) ?? set.prescribed.reps));
+  // briefly empty, and focusing selects the whole value to overwrite. Whatever
+  // ends up here is the log — the target is only ever a starting point.
+  const [reps, setReps] = useState(String((editing ? set.actual?.reps : undefined) ?? set.prescribed.targetReps));
   const [weight, setWeight] = useState(String((editing ? set.actual?.weight : undefined) ?? set.prescribed.weight));
   const [submitting, setSubmitting] = useState<Feeling | null>(null);
-  const [showWhy, setShowWhy] = useState(false);
 
   const onRepsChange = (e: React.ChangeEvent<HTMLInputElement>) =>
     setReps(e.target.value.replace(/[^\d]/g, "").slice(0, 2));
@@ -1144,30 +1049,13 @@ function ActiveSet({
   return (
     <div className="px-4 py-4">
       <div className="flex items-center justify-between">
-        <div className="flex items-center gap-1">
-          <p className="text-[11px] font-normal uppercase tracking-wide text-muted-foreground">
-            {set.prescribed.amrap
-              ? `Set ${set.setNumber} · AMRAP at ${set.prescribed.weight} lbs`
-              : `Set ${set.setNumber} · prescribed ${set.prescribed.reps} × ${set.prescribed.weight}`}
-          </p>
-          {set.prescribed.rationale && (
-            <button
-              type="button"
-              onClick={() => setShowWhy((v) => !v)}
-              aria-label="Why this number?"
-              className="ml-1.5 inline-flex size-4 items-center justify-center rounded-full border border-[var(--teal)] text-[10px] font-bold text-[var(--teal)]"
-            >i</button>
-          )}
-        </div>
+        <p className="text-[11px] font-normal uppercase tracking-wide text-muted-foreground">
+          Set {set.setNumber} · going for {set.prescribed.targetReps} × {set.prescribed.weight}
+        </p>
         <span className="rounded-full bg-[var(--teal)]/10 px-2 py-0.5 text-[11px] font-medium text-[var(--teal)]">
           {editing ? "editing" : "active"}
         </span>
       </div>
-      {showWhy && set.prescribed.rationale && (
-        <p className="mt-2 rounded-[8px] border-[0.5px] border-[var(--teal)]/30 bg-[var(--teal)]/5 px-2.5 py-2 text-[11px] leading-snug text-[var(--teal)]">
-          {set.prescribed.rationale}
-        </p>
-      )}
 
       <div className="mt-3 grid grid-cols-2 gap-3">
         <label className="block">
@@ -1195,17 +1083,6 @@ function ActiveSet({
             onFocus={(e) => e.target.select()}
             className={`mt-1.5 ${numberField}`}
           />
-          <button
-            type="button"
-            onClick={() => {
-              const i = WEIGHT_INCREMENTS.indexOf(increment);
-              onIncrementChange(WEIGHT_INCREMENTS[(i + 1) % WEIGHT_INCREMENTS.length]);
-            }}
-            aria-label={`Weight steps: ${increment} lbs — tap to change`}
-            className="mt-1.5 w-full text-center text-[11px] font-medium text-muted-foreground transition-colors hover:text-[var(--teal)]"
-          >
-            steps of {increment} lbs
-          </button>
         </label>
       </div>
 
@@ -1218,15 +1095,30 @@ function ActiveSet({
         <FeelChip label="Easy" feeling="green" submitting={submitting} onPick={commit} />
       </div>
 
-      {onSkip && !editing && (
-        <button
-          type="button"
-          disabled={submitting !== null}
-          onClick={onSkip}
-          className="mt-3 w-full text-center text-xs font-medium text-muted-foreground transition-colors hover:text-foreground disabled:opacity-60"
-        >
-          Skip this set
-        </button>
+      {(onSkip || onRemove) && (
+        <div className="mt-3 flex items-center justify-center gap-4 text-xs font-medium text-muted-foreground">
+          {onSkip && (
+            <button
+              type="button"
+              disabled={submitting !== null}
+              onClick={onSkip}
+              className="transition-colors hover:text-foreground disabled:opacity-60"
+            >
+              Skip this set
+            </button>
+          )}
+          {onSkip && onRemove && <span aria-hidden className="h-3 w-px bg-[var(--hairline)]" />}
+          {onRemove && (
+            <button
+              type="button"
+              disabled={submitting !== null}
+              onClick={onRemove}
+              className="transition-colors hover:text-[var(--feel-hard-fg)] disabled:opacity-60"
+            >
+              Remove set
+            </button>
+          )}
+        </div>
       )}
     </div>
   );

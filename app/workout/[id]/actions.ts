@@ -7,12 +7,14 @@ import {
   abandonWorkout as abandonWorkoutImpl,
   skipSet as skipSetImpl,
   skipExercise as skipExerciseImpl,
+  addSet as addSetImpl,
+  removeSet as removeSetImpl,
   restartWorkout as restartWorkoutImpl,
   setExerciseIncrement as setExerciseIncrementImpl,
+  setExerciseRepRange as setExerciseRepRangeImpl,
   swapExercise as swapExerciseImpl,
 } from "@/lib/actions/workouts";
 import type { CommitSetInput } from "@/lib/actions/workouts";
-import { pinBaseline as pinBaselineImpl } from "@/lib/actions/lift-estimates";
 
 export async function commitSet(input: CommitSetInput) {
   return commitSetImpl(input);
@@ -26,24 +28,30 @@ export async function completeWorkout(workoutId: string) {
 export async function abandonWorkout(workoutId: string) {
   return abandonWorkoutImpl(workoutId);
 }
-export async function pinBaseline(i: { exerciseName: string; weightLbs: number; reps: number }) {
-  return pinBaselineImpl(i);
-}
 export async function skipSet(input: { workoutId: string; setId: string }) {
   return skipSetImpl(input);
 }
 export async function skipExercise(input: { workoutId: string; exerciseName: string }) {
   return skipExerciseImpl(input);
 }
+export async function addSet(input: { workoutId: string; exerciseName: string }) {
+  return addSetImpl(input);
+}
+export async function removeSet(input: { workoutId: string; setId: string }) {
+  return removeSetImpl(input);
+}
 export async function restartWorkout(workoutId: string) {
   return restartWorkoutImpl(workoutId);
 }
-export async function setExerciseIncrement(input: {
-  workoutId: string;
-  exerciseName: string;
-  increment: number;
-}) {
+export async function setExerciseIncrement(input: { exerciseName: string; increment: number }) {
   return setExerciseIncrementImpl(input);
+}
+export async function setExerciseRepRange(input: {
+  exerciseName: string;
+  min: number;
+  max: number;
+}) {
+  return setExerciseRepRangeImpl(input);
 }
 export async function swapExercise(input: {
   workoutId: string;

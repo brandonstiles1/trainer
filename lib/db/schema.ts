@@ -10,6 +10,7 @@ import {
   jsonb,
   pgEnum,
   primaryKey,
+  index,
 } from "drizzle-orm/pg-core";
 
 // ────────── enums ──────────
@@ -80,18 +81,24 @@ export const workouts = pgTable("workouts", {
   completedAt: timestamp("completed_at", { withTimezone: true }),
 });
 
-export const workoutSets = pgTable("workout_sets", {
-  id: uuid("id").primaryKey().defaultRandom(),
-  workoutId: uuid("workout_id").notNull(),
-  exerciseName: text("exercise_name").notNull(),
-  setNumber: smallint("set_number").notNull(),
-  // Position of the exercise within the workout; survives mid-workout swaps
-  // (rows predating the column are all 0 and fall back to plan-day order).
-  exerciseOrder: smallint("exercise_order").notNull().default(0),
-  prescribed: jsonb("prescribed").notNull(),
-  actual: jsonb("actual"),
-  completedAt: timestamp("completed_at", { withTimezone: true }),
-});
+export const workoutSets = pgTable(
+  "workout_sets",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    workoutId: uuid("workout_id").notNull(),
+    exerciseName: text("exercise_name").notNull(),
+    setNumber: smallint("set_number").notNull(),
+    // Position of the exercise within the workout; survives mid-workout swaps
+    // (rows predating the column are all 0 and fall back to plan-day order).
+    exerciseOrder: smallint("exercise_order").notNull().default(0),
+    prescribed: jsonb("prescribed").notNull(),
+    actual: jsonb("actual"),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+  },
+  // Every workout creation and every info-panel open asks the same question:
+  // what did this exercise do last time?
+  (t) => [index("workout_sets_exercise_name_idx").on(t.exerciseName)],
+);
 
 export const exercisePreferences = pgTable(
   "exercise_preferences",
@@ -100,6 +107,10 @@ export const exercisePreferences = pgTable(
     exerciseName: text("exercise_name").notNull(),
     /** Smallest load step available for this exercise in the user's gym (lbs). */
     weightIncrement: real("weight_increment").notNull(),
+    /** Rep range the exercise climbs before earning a weight step. Null → the
+     *  compound/isolation default inferred from the exercise name. */
+    repMin: smallint("rep_min"),
+    repMax: smallint("rep_max"),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [primaryKey({ columns: [t.userId, t.exerciseName] })],

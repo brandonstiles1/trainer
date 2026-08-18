@@ -1,8 +1,10 @@
 export type Feeling = "red" | "yellow" | "green";
 export type Actual = { reps: number; weight: number; feeling: Feeling };
 
-// In-workout adaptation lives in lib/engine (autoregulate) via
-// lib/workouts/engine-adapter; this module keeps the shared Epley math.
+// Progression lives in lib/engine/progression and runs on logged reps and
+// weights alone. The Epley math below survives for exactly one job: turning a
+// signup answer ("I can bench 185×5") into an opening load for an exercise the
+// user has never logged. See seedWeightsFor in lib/workouts/log-book.
 
 /** Estimated one-rep max (Epley). */
 export function estimate1RM(weight: number, reps: number): number {

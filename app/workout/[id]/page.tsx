@@ -1,19 +1,17 @@
 import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import { db } from "@/lib/db";
-import { workouts, workoutSets, profiles, plans, liftEstimates, exercisePreferences } from "@/lib/db/schema";
-import { and, asc, desc, eq, inArray } from "drizzle-orm";
-import { estimate1RM } from "@/lib/adapt";
-import { Session, type SessionSet } from "./session";
+import { workouts, workoutSets, profiles } from "@/lib/db/schema";
+import { and, asc, eq } from "drizzle-orm";
+import { inferExerciseMeta } from "@/lib/engine/infer-meta";
+import {
+  exercisePreferencesFor,
+  planExerciseOrder,
+  recentSessionsFor,
+} from "@/lib/workouts/log-book";
+import { personalRecord } from "@/lib/workouts/exercise-history";
+import { Session, type ExerciseInfo, type SessionSet } from "./session";
 import { Summary } from "@/components/workout/summary";
-
-type PlanStructure = {
-  days: Array<{
-    day: string;
-    category: string;
-    exercises: Array<{ name: string; order: number }>;
-  }>;
-};
 
 export default async function WorkoutPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
@@ -34,27 +32,15 @@ export default async function WorkoutPage({ params }: { params: Promise<{ id: st
     .where(eq(workoutSets.workoutId, id))
     .orderBy(asc(workoutSets.setNumber));
 
-  // Sort exercises by their order in the plan day (workoutSets has no exercise-order column).
-  const [plan] = await db
-    .select({ structure: plans.structure })
-    .from(plans)
-    .where(eq(plans.id, workout.planId))
-    .limit(1);
-  const planDay = (plan?.structure as PlanStructure | undefined)?.days.find(
-    (d) => d.category === workout.dayKey,
-  );
-  const exerciseOrder = new Map<string, number>();
-  if (planDay) {
-    for (const ex of planDay.exercises) {
-      exerciseOrder.set(ex.name, ex.order);
-    }
-  }
   // exercise_order wins (it survives mid-workout swaps); rows predating the
   // column are all 0 and fall through to plan-day order.
+  const planOrder = new Map(
+    (await planExerciseOrder(workout.planId, workout.dayKey)).map((name, i) => [name, i]),
+  );
   const sortedRows = [...rows].sort((a, b) => {
     if (a.exerciseOrder !== b.exerciseOrder) return a.exerciseOrder - b.exerciseOrder;
-    const ao = exerciseOrder.get(a.exerciseName) ?? 999;
-    const bo = exerciseOrder.get(b.exerciseName) ?? 999;
+    const ao = planOrder.get(a.exerciseName) ?? 999;
+    const bo = planOrder.get(b.exerciseName) ?? 999;
     if (ao !== bo) return ao - bo;
     return a.setNumber - b.setNumber;
   });
@@ -82,52 +68,37 @@ export default async function WorkoutPage({ params }: { params: Promise<{ id: st
   });
 
   const [profile] = await db
-    .select({ rest: profiles.restTimerSeconds, weightLbs: profiles.weightLbs })
+    .select({ rest: profiles.restTimerSeconds })
     .from(profiles)
     .where(eq(profiles.userId, user.id))
     .limit(1);
-  const restSeconds = profile?.rest ?? 75;
 
-  // Latest lift estimate per exercise (any source) → baseline e1RM for the
-  // client-side engine mirror. Mirrors latestBaselines in lib/actions/workouts.
+  // The log book behind the info icon: recent sessions, PR, and the settings
+  // that decide when this exercise earns a bump. Loaded here so tapping the
+  // icon mid-workout is instant.
   const exerciseNames = [...new Set(sets.map((s) => s.exerciseName))];
-  const estimates = exerciseNames.length
-    ? await db
-        .select({
-          exerciseName: liftEstimates.exerciseName,
-          weightLbs: liftEstimates.weightLbs,
-          reps: liftEstimates.reps,
-        })
-        .from(liftEstimates)
-        .where(
-          and(
-            eq(liftEstimates.userId, user.id),
-            inArray(liftEstimates.exerciseName, exerciseNames),
-          ),
-        )
-        .orderBy(desc(liftEstimates.recordedAt))
-    : [];
-  const baselines: Record<string, number | null> = {};
-  for (const name of exerciseNames) baselines[name] = null;
-  for (const e of estimates) {
-    if (baselines[e.exerciseName] === null) baselines[e.exerciseName] = estimate1RM(e.weightLbs, e.reps);
-  }
-
-  const prefs = exerciseNames.length
-    ? await db
-        .select({
-          exerciseName: exercisePreferences.exerciseName,
-          weightIncrement: exercisePreferences.weightIncrement,
-        })
-        .from(exercisePreferences)
-        .where(
-          and(
-            eq(exercisePreferences.userId, user.id),
-            inArray(exercisePreferences.exerciseName, exerciseNames),
-          ),
-        )
-    : [];
-  const increments = Object.fromEntries(prefs.map((p) => [p.exerciseName, p.weightIncrement]));
+  const [history, prefs] = await Promise.all([
+    recentSessionsFor(user.id, exerciseNames),
+    exercisePreferencesFor(user.id, exerciseNames),
+  ]);
+  const info: Record<string, ExerciseInfo> = Object.fromEntries(
+    exerciseNames.map((name) => {
+      const meta = inferExerciseMeta(name);
+      const sessions = history[name] ?? [];
+      return [
+        name,
+        {
+          sessions: sessions.map((s) => ({
+            finishedAt: s.finishedAt ? s.finishedAt.toISOString() : null,
+            sets: s.sets,
+          })),
+          personalRecord: personalRecord(sessions),
+          weightIncrement: prefs[name]?.weightIncrement ?? meta.weightIncrement,
+          repRange: prefs[name]?.repRange ?? meta.repRange,
+        } satisfies ExerciseInfo,
+      ];
+    }),
+  );
 
   return (
     <Session
@@ -137,11 +108,9 @@ export default async function WorkoutPage({ params }: { params: Promise<{ id: st
       workoutId={id}
       dayName={workout.dayKey}
       initialSets={sets}
-      restSeconds={restSeconds}
+      restSeconds={profile?.rest ?? 75}
       startedAtMs={workout.startedAt.getTime()}
-      baselines={baselines}
-      bodyweightLbs={profile?.weightLbs ?? undefined}
-      initialIncrements={increments}
+      exerciseInfo={info}
     />
   );
 }

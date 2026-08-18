@@ -1,74 +1,129 @@
 import { describe, it, expect } from "vitest";
-import { prescribeExercise, type PrescribeExerciseInput } from "@/lib/workouts/prescribe-exercise";
-import type { SessionSetLog } from "@/lib/engine/next-workout";
+import { prescribeExercise, BASE_SET_COUNT } from "@/lib/workouts/prescribe-exercise";
+import type { ExerciseSession } from "@/lib/workouts/exercise-history";
+import { inferExerciseMeta } from "@/lib/engine/infer-meta";
 
-const base = (over: Partial<PrescribeExerciseInput> = {}): PrescribeExerciseInput => ({
-  name: "bench_press",
-  baselineE1rm: 500 / 3, // 125×8 @ RIR 2
-  lastSession: null,
-  e1rmHistory: [],
-  weeklyHardSetsForGroup: 10,
-  consecutiveEasySessions: 0,
-  ...over,
+const sessionOf = (
+  sets: Array<{ targetReps: number; weight: number; reps: number }>,
+  id = "w1",
+  plannedSets?: number,
+): ExerciseSession => ({
+  workoutId: id,
+  finishedAt: new Date("2026-08-01"),
+  plannedSets: plannedSets ?? sets.length,
+  sets: sets.map((s) => ({ ...s, feel: "medium" as const })),
 });
 
-const logs = (count: number, weight: number, reps: number, feel: SessionSetLog["feel"], prescribedReps = reps): SessionSetLog[] =>
-  Array.from({ length: count }, () => ({ prescribedReps, weight, reps, feel }));
+const threeSetsAt = (targetReps: number, weight: number, reps = targetReps, id = "w1") =>
+  sessionOf(
+    Array.from({ length: 3 }, () => ({ targetReps, weight, reps })),
+    id,
+  );
 
 describe("prescribeExercise", () => {
-  it("no history but a baseline → conservative probe sets", () => {
-    const rows = prescribeExercise(base());
-    expect(rows).toHaveLength(3);
-    // Compound mid-range 8 reps @ RIR 2, ×0.95 probe: 166.7×0.95/1.333 ≈ 119 → 120.
-    expect(rows[0].prescribed).toMatchObject({ reps: 8, weight: 120 });
-    expect(rows[0].prescribed.calibration).toBeUndefined();
+  it("opens a first-timer at the bottom of the rep range", () => {
+    const rows = prescribeExercise({ name: "barbell_curl", sessions: [] });
+    expect(rows).toHaveLength(BASE_SET_COUNT);
+    expect(rows[0].setNumber).toBe(1);
+    expect(rows[0].prescribed.targetReps).toBe(inferExerciseMeta("barbell_curl").repRange.min);
   });
 
-  it("no baseline at all → calibration ramp with AMRAP, flagged", () => {
-    const rows = prescribeExercise(base({ name: "machine_curl", baselineE1rm: null }));
-    expect(rows).toHaveLength(3);
-    expect(rows.every((r) => r.prescribed.calibration)).toBe(true);
-    expect(rows[0].prescribed).toMatchObject({ weight: 30, reps: 10 }); // machine start
-    expect(rows[2].prescribed.amrap).toBe(true);
+  it("carries the seed load onto every opening set", () => {
+    const rows = prescribeExercise({ name: "bench_press", sessions: [], seedWeight: 135 });
+    expect(rows.every((r) => r.prescribed.weight === 135)).toBe(true);
   });
 
-  it("progresses from the last session via outcome classification", () => {
-    const rows = prescribeExercise(
-      base({ lastSession: { sets: logs(3, 100, 10, "medium"), wasDeload: false }, e1rmHistory: [140] }),
-    );
-    // (a): top of range, RIR ≥ 2 → +load, reset to bottom of range.
-    expect(rows.every((r) => r.prescribed.weight === 105 && r.prescribed.reps === 6)).toBe(true);
+  it("adds a rep after a clean session", () => {
+    const rows = prescribeExercise({
+      name: "barbell_curl",
+      sessions: [threeSetsAt(10, 55)],
+    });
+    expect(rows.map((r) => r.prescribed.targetReps)).toEqual([11, 11, 11]);
+    expect(rows.every((r) => r.prescribed.weight === 55)).toBe(true);
+  });
+
+  it("repeats the target after a missed set", () => {
+    const rows = prescribeExercise({
+      name: "barbell_curl",
+      sessions: [
+        sessionOf([
+          { targetReps: 10, weight: 55, reps: 10 },
+          { targetReps: 10, weight: 55, reps: 9 },
+          { targetReps: 10, weight: 55, reps: 9 },
+        ]),
+      ],
+    });
+    expect(rows.map((r) => r.prescribed.targetReps)).toEqual([10, 10, 10]);
+  });
+
+  it("keeps the session's set count rather than resetting to the default", () => {
+    const rows = prescribeExercise({
+      name: "barbell_curl",
+      sessions: [sessionOf([{ targetReps: 10, weight: 55, reps: 10 }])],
+    });
+    expect(rows).toHaveLength(1);
+  });
+
+  it("holds the set count when a set was skipped rather than logged", () => {
+    const rows = prescribeExercise({
+      name: "barbell_curl",
+      sessions: [
+        sessionOf(
+          [
+            { targetReps: 10, weight: 55, reps: 10 },
+            { targetReps: 10, weight: 55, reps: 10 },
+          ],
+          "w1",
+          3,
+        ),
+      ],
+    });
+    expect(rows).toHaveLength(3);
+    expect(rows[2].prescribed).toMatchObject({ weight: 55, targetReps: 11 });
+  });
+
+  it("honours a rep-range preference over the inferred default", () => {
+    const rows = prescribeExercise({
+      name: "barbell_curl",
+      sessions: [threeSetsAt(6, 55)],
+      repRange: { min: 4, max: 6 },
+      weightIncrement: 5,
+    });
+    // Already at the top of the custom range, so this is a weight step.
+    expect(rows[0].prescribed.weight).toBe(60);
+    expect(rows[0].prescribed.targetReps).toBe(4);
+  });
+
+  it("honours a weight-increment preference", () => {
+    const rows = prescribeExercise({
+      name: "barbell_curl",
+      sessions: [threeSetsAt(15, 55)],
+      weightIncrement: 2.5,
+    });
+    expect(rows[0].prescribed.weight).toBe(57.5);
+  });
+
+  it("puts the reason on set 1 only", () => {
+    const rows = prescribeExercise({
+      name: "barbell_curl",
+      sessions: [threeSetsAt(10, 55)],
+    });
     expect(rows[0].prescribed.rationale).toBeTruthy();
+    expect(rows.slice(1).every((r) => r.prescribed.rationale === undefined)).toBe(true);
   });
 
-  it("declining e1RM produces a deload-flagged half-session", () => {
-    const rows = prescribeExercise(
-      base({
-        lastSession: { sets: logs(4, 100, 8, "hard"), wasDeload: false },
-        e1rmHistory: [150, 145, 140],
-      }),
-    );
-    expect(rows).toHaveLength(2);
-    expect(rows.every((r) => r.prescribed.deload && r.prescribed.weight === 100)).toBe(true);
+  it("writes reps and targetReps together so old readers still work", () => {
+    const rows = prescribeExercise({ name: "barbell_curl", sessions: [threeSetsAt(10, 55)] });
+    expect(rows.every((r) => r.prescribed.reps === r.prescribed.targetReps)).toBe(true);
   });
 
-  it("a deloaded last session resets to base probe sets", () => {
-    const rows = prescribeExercise(
-      base({ lastSession: { sets: logs(2, 100, 8, "easy"), wasDeload: true } }),
-    );
-    expect(rows).toHaveLength(3); // back to base volume
-    expect(rows.every((r) => !r.prescribed.deload)).toBe(true);
-  });
-
-  it("two easy sessions under the weekly cap add a set; at the cap they don't", () => {
-    const session = { sets: logs(3, 100, 8, "medium"), wasDeload: false };
-    const added = prescribeExercise(
-      base({ lastSession: session, e1rmHistory: [140], consecutiveEasySessions: 2, weeklyHardSetsForGroup: 12 }),
-    );
-    expect(added).toHaveLength(4);
-    const capped = prescribeExercise(
-      base({ lastSession: session, e1rmHistory: [140], consecutiveEasySessions: 2, weeklyHardSetsForGroup: 20 }),
-    );
-    expect(capped).toHaveLength(3);
+  it("flags a stall once the same target has held for three sessions", () => {
+    const stuck = [
+      threeSetsAt(10, 55, 9, "w1"),
+      threeSetsAt(10, 55, 9, "w2"),
+      threeSetsAt(10, 55, 9, "w3"),
+    ];
+    expect(prescribeExercise({ name: "barbell_curl", sessions: stuck })[0].prescribed.rationale)
+      .toContain("stuck");
   });
 });

@@ -5,7 +5,7 @@ import { db } from "@/lib/db";
 import { plans, goals } from "@/lib/db/schema";
 import { and, eq } from "drizzle-orm";
 import { extractPlan, type Plan } from "@/lib/plan-parser";
-import { adjustTodayWorkout } from "@/lib/actions/workouts";
+import { adjustTodayWorkout } from "@/lib/workouts/log-book";
 
 export type AcceptPlanInput = {
   goalId: string;

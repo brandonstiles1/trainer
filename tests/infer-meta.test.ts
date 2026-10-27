@@ -7,7 +7,7 @@ describe("inferExerciseMeta", () => {
       type: "barbell",
       isCompound: true,
       muscleGroups: ["chest"],
-      repRange: { min: 6, max: 10 },
+      repRange: { min: 8, max: 10 },
     });
     expect(inferExerciseMeta("back_squat")).toMatchObject({ type: "barbell", isCompound: true });
     expect(inferExerciseMeta("pull_up")).toMatchObject({ type: "bodyweight", isCompound: true });
@@ -43,6 +43,13 @@ describe("inferExerciseMeta", () => {
       muscleGroups: ["back"],
     });
     expect(inferExerciseMeta("face_pull").muscleGroups).toContain("shoulders");
+  });
+
+  it("an explicit dumbbell beats barbell keywords", () => {
+    expect(inferExerciseMeta("dumbbell_bench_press")).toMatchObject({ type: "dumbbell", isCompound: true });
+    expect(inferExerciseMeta("leg_curl")).toMatchObject({ type: "machine", isLowerBody: true });
+    expect(inferExerciseMeta("barbell_squat")).toMatchObject({ isCompound: true, isLowerBody: true });
+    expect(inferExerciseMeta("incline_dumbbell_press")).toMatchObject({ isLowerBody: false });
   });
 
   it("falls back to a full-body machine exercise for unknown names", () => {

@@ -5,20 +5,20 @@ export type RepRange = { min: number; max: number };
 export type ExerciseMeta = {
   type: ExerciseType;
   isCompound: boolean;
+  /** Lower-body compounds take bigger jumps (+5–10 lb) than upper-body ones. */
+  isLowerBody: boolean;
   muscleGroups: string[];
-  /** Smallest load step: barbell/dumbbell 5 lb, machines their plate step, bodyweight = added-load step. */
+  /** Fallback load step when no settings are in play. Dumbbells: per dumbbell. */
   weightIncrement: number;
   repRange: RepRange;
   restSeconds: number;
 };
 
-export const COMPOUND_REP_RANGE: RepRange = { min: 6, max: 10 };
+export const COMPOUND_REP_RANGE: RepRange = { min: 8, max: 10 };
 export const ISOLATION_REP_RANGE: RepRange = { min: 10, max: 15 };
-export const COMPOUND_REST_SECONDS = 150; // 2–3 min
+export const COMPOUND_REST_SECONDS = 105; // 90–120 s
 export const ISOLATION_REST_SECONDS = 75; // 60–90 s
 
-// Machine default is 5 (half-plate/cable steps): 10-lb rounding is coarser than
-// the ±15% clamp band at light weights and can bounce a cut back to the old load.
 const DEFAULT_INCREMENT: Record<ExerciseType, number> = {
   barbell: 5,
   dumbbell: 5,
@@ -30,12 +30,14 @@ const DEFAULT_INCREMENT: Record<ExerciseType, number> = {
 export function defaultExerciseMeta(input: {
   type: ExerciseType;
   isCompound: boolean;
+  isLowerBody?: boolean;
   muscleGroups: string[];
   weightIncrement?: number;
 }): ExerciseMeta {
   return {
     type: input.type,
     isCompound: input.isCompound,
+    isLowerBody: input.isLowerBody ?? false,
     muscleGroups: input.muscleGroups,
     weightIncrement: input.weightIncrement ?? DEFAULT_INCREMENT[input.type],
     repRange: input.isCompound ? COMPOUND_REP_RANGE : ISOLATION_REP_RANGE,

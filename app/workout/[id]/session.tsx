@@ -1,40 +1,39 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState, useTransition } from "react";
+import { useMemo, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import {
-  ChevronDown,
-  ChevronRight,
-  MoreHorizontal,
+  ArrowDown,
+  ArrowUp,
   Check,
+  ChevronDown,
   Clock,
-  Timer,
+  Info,
+  MoreHorizontal,
   Pause,
   Play,
   Plus,
   RefreshCw,
+  Timer,
 } from "lucide-react";
-import type { Feeling } from "@/lib/adapt";
-import type { RepRange } from "@/lib/engine/exercise-meta";
-import type { StoredPrescribed } from "@/lib/workouts/stored-set";
+import { cn } from "@/lib/utils";
+import { formatDuration, formatSets, formatWeight, titleCase } from "@/lib/format";
 import { setsToCarryWeight } from "@/lib/workouts/carry-weight";
 import { alternativesFor } from "@/lib/workouts/exercise-alternatives";
 import {
-  commitSet,
-  editSet,
-  completeWorkout,
   abandonWorkout,
-  skipSet,
-  skipExercise,
   addSet,
+  commitSet,
+  completeWorkout,
   removeSet,
   restartWorkout,
   setExerciseIncrement,
-  setExerciseRepRange,
+  skipExercise,
   swapExercise,
-} from "./actions";
+  uncommitSet,
+} from "@/lib/actions/workouts";
 import { ExerciseInfoSheet, type ExerciseInfo } from "./exercise-info-sheet";
-import { formatDuration } from "@/lib/format";
+import { usePausableClock, useRestTimer } from "./timers";
 
 export type { ExerciseInfo };
 
@@ -42,180 +41,16 @@ export type SessionSet = {
   id: string;
   exerciseName: string;
   setNumber: number;
-  prescribed: StoredPrescribed;
+  targetWeight: number;
+  targetReps: number;
+  /** Logged or skipped. */
   completed: boolean;
-  actual: { reps: number; weight: number; feeling: Feeling } | null;
+  actual: { reps: number; weight: number } | null;
 };
 
-type Actual = { reps: number; weight: number; feeling: Feeling };
+type Draft = { weight: string; reps: string };
 
-const titleCase = (s: string) =>
-  s.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
-
-const formatVolume = (n: number) =>
-  n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
-
-const feelColor: Record<Feeling, string> = {
-  red: "var(--feel-hard-fg)",
-  yellow: "var(--feel-okay-fg)",
-  green: "var(--teal)",
-};
-
-type PauseState = { pausedAtMs: number | null; totalPausedMs: number };
-
-/** Timestamp-based count-up clock with pause/resume, persisted to localStorage
- *  so it stays correct across re-renders, navigation, reload and lock/unlock. */
-function usePausableClock(startMs: number, workoutId: string) {
-  const storageKey = `trainer:pause:${workoutId}:${startMs}`;
-  const [pause, setPause] = useState<PauseState>({ pausedAtMs: null, totalPausedMs: 0 });
-  const [now, setNow] = useState(startMs);
-
-  // Resume persisted pause state post-mount (hydration-safe, like useRestTimer).
-  useEffect(() => {
-    const resume = () => {
-      try {
-        const raw = localStorage.getItem(storageKey);
-        if (raw) setPause(JSON.parse(raw) as PauseState);
-      } catch {
-        /* ignore */
-      }
-    };
-    const id = setTimeout(resume, 0);
-    return () => clearTimeout(id);
-  }, [storageKey]);
-
-  useEffect(() => {
-    const tick = () => setNow(Date.now());
-    tick();
-    const id = setInterval(tick, 1000);
-    return () => clearInterval(id);
-  }, []);
-
-  const toggle = useCallback(() => {
-    setPause((prev) => {
-      const next: PauseState =
-        prev.pausedAtMs !== null
-          ? { pausedAtMs: null, totalPausedMs: prev.totalPausedMs + (Date.now() - prev.pausedAtMs) }
-          : { pausedAtMs: Date.now(), totalPausedMs: prev.totalPausedMs };
-      try {
-        if (next.pausedAtMs === null && next.totalPausedMs === 0)
-          localStorage.removeItem(storageKey);
-        else localStorage.setItem(storageKey, JSON.stringify(next));
-      } catch {
-        /* storage unavailable — pause still works in-memory */
-      }
-      return next;
-    });
-  }, [storageKey]);
-
-  const paused = pause.pausedAtMs !== null;
-  const frozenNow = paused ? pause.pausedAtMs! : now;
-  const elapsed = Math.max(0, Math.floor((frozenNow - startMs - pause.totalPausedMs) / 1000));
-  return { elapsed, paused, toggle };
-}
-
-type RestState = { endsAt: number; durationMs: number };
-
-/** Rest timer driven by an absolute end timestamp and persisted to
- *  localStorage. Survives re-render, navigation away/back, full reload and
- *  phone lock — on return we recompute remaining from the clock, not a counter. */
-function useRestTimer(workoutId: string) {
-  const storageKey = `trainer:rest:${workoutId}`;
-  const [rest, setRest] = useState<RestState | null>(null);
-  const [now, setNow] = useState(0);
-
-  const persist = useCallback(
-    (r: RestState | null) => {
-      try {
-        if (r) localStorage.setItem(storageKey, JSON.stringify(r));
-        else localStorage.removeItem(storageKey);
-      } catch {
-        /* storage unavailable — timer still works in-memory */
-      }
-    },
-    [storageKey],
-  );
-
-  // Resume an in-flight rest after reload/navigation. Deferred to a timer
-  // callback so the read happens post-mount (hydration-safe) without a
-  // synchronous setState in the effect body.
-  useEffect(() => {
-    const resume = () => {
-      try {
-        const raw = localStorage.getItem(storageKey);
-        if (!raw) return;
-        const r = JSON.parse(raw) as RestState;
-        if (r && typeof r.endsAt === "number" && r.endsAt > Date.now()) setRest(r);
-        else localStorage.removeItem(storageKey);
-      } catch {
-        /* ignore */
-      }
-    };
-    const id = setTimeout(resume, 0);
-    return () => clearTimeout(id);
-  }, [storageKey]);
-
-  // Tick while active; clear when it elapses.
-  useEffect(() => {
-    if (!rest) return;
-    const tick = () => {
-      const t = Date.now();
-      setNow(t);
-      if (t >= rest.endsAt) {
-        setRest(null);
-        persist(null);
-      }
-    };
-    tick();
-    const id = setInterval(tick, 250);
-    return () => clearInterval(id);
-  }, [rest, persist]);
-
-  const remainingMs = rest ? Math.max(0, rest.endsAt - now) : 0;
-
-  const start = useCallback(
-    (seconds: number) => {
-      const r = { endsAt: Date.now() + seconds * 1000, durationMs: seconds * 1000 };
-      setRest(r);
-      persist(r);
-    },
-    [persist],
-  );
-
-  const extend = useCallback(
-    (seconds: number) => {
-      setRest((prev) => {
-        const base = prev ?? { endsAt: Date.now(), durationMs: 0 };
-        const r = {
-          endsAt: base.endsAt + seconds * 1000,
-          durationMs: base.durationMs + seconds * 1000,
-        };
-        persist(r);
-        return r;
-      });
-    },
-    [persist],
-  );
-
-  const skip = useCallback(() => {
-    setRest(null);
-    persist(null);
-  }, [persist]);
-
-  return {
-    active: !!rest,
-    remainingMs,
-    durationMs: rest?.durationMs ?? 0,
-    start,
-    extend,
-    skip,
-  };
-}
-
-/**
- * Client mirror of the server's one downstream effect: later sets of the same
- * exercise follow the load actually lifted.
- */
+/** Client mirror of the server rule: later unlogged sets follow the weight actually lifted. */
 function carryWeight(sets: SessionSet[], logged: SessionSet, weight: number): SessionSet[] {
   const ids = new Set(
     setsToCarryWeight(
@@ -224,61 +59,51 @@ function carryWeight(sets: SessionSet[], logged: SessionSet, weight: number): Se
         exerciseName: s.exerciseName,
         setNumber: s.setNumber,
         resolved: s.completed || s.id === logged.id,
-        targetWeight: s.prescribed.weight,
+        targetWeight: s.targetWeight,
       })),
       { exerciseName: logged.exerciseName, setNumber: logged.setNumber, weight },
     ),
   );
-  return sets.map((s) =>
-    ids.has(s.id) ? { ...s, prescribed: { ...s.prescribed, weight } } : s,
-  );
+  return sets.map((s) => (ids.has(s.id) ? { ...s, targetWeight: weight } : s));
 }
+
+const parseWeight = (v: string) => {
+  const n = Number(v.replace("−", "-"));
+  return Number.isFinite(n) ? n : NaN;
+};
 
 export function Session({
   workoutId,
-  dayName,
+  title,
   initialSets,
-  restSeconds,
+  restTimer,
   startedAtMs,
   exerciseInfo,
 }: {
   workoutId: string;
-  dayName: string;
+  title: string;
   initialSets: SessionSet[];
-  restSeconds: number;
+  restTimer: boolean;
   startedAtMs: number;
   exerciseInfo: Record<string, ExerciseInfo>;
 }) {
   const router = useRouter();
   const [sets, setSets] = useState(initialSets);
+  const [drafts, setDrafts] = useState<Record<string, Draft>>({});
   const [info, setInfo] = useState(exerciseInfo);
   const [infoFor, setInfoFor] = useState<string | null>(null);
-  const [activeSetId, setActiveSetId] = useState<string | null>(
-    () => initialSets.find((s) => !s.completed)?.id ?? null,
-  );
-  const [openSetId, setOpenSetId] = useState<string | null>(null);
-  // Exercise whose swap picker is open.
   const [swapFor, setSwapFor] = useState<string | null>(null);
   const [swapping, setSwapping] = useState(false);
-  // Bottom sheet: workout menu (restart/quit) or a confirm step reached from it / from Finish.
-  const [sheet, setSheet] = useState<"menu" | "restart" | "finish" | null>(null);
-  // Manual collapse/expand, independent of which set is active. Start with the
-  // current exercise open.
-  const [expanded, setExpanded] = useState<Set<string>>(() => {
-    const name = initialSets.find((s) => !s.completed)?.exerciseName;
-    return new Set(name ? [name] : []);
-  });
+  const [sheet, setSheet] = useState<"menu" | "restart" | "discard" | null>(null);
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  const [error, setError] = useState<string | null>(null);
   const [pending, startTransition] = useTransition();
 
   const { elapsed, paused, toggle: togglePause } = usePausableClock(startedAtMs, workoutId);
   const rest = useRestTimer(workoutId);
 
-  const completedCount = sets.filter((s) => s.completed).length;
-  const allDone = completedCount === sets.length;
-  const volume = sets.reduce(
-    (sum, s) => (s.actual ? sum + s.actual.reps * s.actual.weight : sum),
-    0,
-  );
+  const loggedCount = sets.filter((s) => s.actual).length;
+  const openCount = sets.filter((s) => !s.completed).length;
 
   const byExercise = useMemo(() => {
     const order: string[] = [];
@@ -293,175 +118,125 @@ export function Session({
     return order.map((name) => [name, map.get(name)!] as const);
   }, [sets]);
 
-  function toggleExpanded(name: string) {
-    setExpanded((prev) => {
-      const next = new Set(prev);
-      if (next.has(name)) next.delete(name);
-      else next.add(name);
+  // The first exercise with an open set gets the "current" marker.
+  const current = byExercise.find(([, list]) => list.some((s) => !s.completed))?.[0] ?? null;
+
+  const fail = (msg: string) => {
+    setError(msg);
+    setTimeout(() => setError((e) => (e === msg ? null : e)), 4000);
+  };
+
+  const draftOf = (s: SessionSet): Draft =>
+    drafts[s.id] ?? {
+      weight: String(s.actual?.weight ?? s.targetWeight),
+      reps: String(s.actual?.reps ?? s.targetReps),
+    };
+
+  function setDraft(id: string, patch: Partial<Draft>, base: Draft) {
+    setDrafts((prev) => ({ ...prev, [id]: { ...base, ...prev[id], ...patch } }));
+  }
+
+  async function handleLog(set: SessionSet) {
+    const d = draftOf(set);
+    const actual = { weight: parseWeight(d.weight), reps: Math.round(Number(d.reps)) };
+    if (!Number.isFinite(actual.weight) || !Number.isFinite(actual.reps) || d.reps === "") {
+      fail("Enter a weight and reps first.");
+      return;
+    }
+    const wasLogged = set.actual !== null;
+    const snapshot = sets;
+    const updated = carryWeight(
+      sets.map((s) => (s.id === set.id ? { ...s, completed: true, actual } : s)),
+      set,
+      actual.weight,
+    );
+    setSets(updated);
+    setDrafts((prev) => {
+      const next = { ...prev };
+      delete next[set.id];
       return next;
     });
-  }
 
-  async function handleCommit(setId: string, actual: Actual) {
-    const idx = sets.findIndex((s) => s.id === setId);
-    if (idx === -1) return;
-    const current = sets[idx];
+    // Re-saving an edit shouldn't restart your rest.
+    if (!wasLogged && restTimer) rest.start(info[set.exerciseName]?.restSeconds ?? 90);
 
-    const next = sets.find(
-      (s, i) => i > idx && s.exerciseName === current.exerciseName && !s.completed,
-    );
-
-    const logged = sets.map((s) => (s.id === setId ? { ...s, completed: true, actual } : s));
-    const updated = carryWeight(logged, current, actual.weight);
-
-    const nextActive = next ?? updated.find((s) => !s.completed && s.id !== setId) ?? null;
-
-    const snapshot = sets;
-    setSets(updated);
-    setOpenSetId(null);
-    setActiveSetId(nextActive?.id ?? null);
-    if (nextActive) {
-      setExpanded((prev) =>
-        prev.has(nextActive.exerciseName) ? prev : new Set(prev).add(nextActive.exerciseName),
-      );
+    // Exercise finished? Fold it away so the next one is in view.
+    const left = updated.filter((s) => s.exerciseName === set.exerciseName && !s.completed);
+    if (left.length === 0 && !wasLogged) {
+      setCollapsed((prev) => new Set(prev).add(set.exerciseName));
     }
-    // Anytime "done" is tapped the rest clock starts — even on the workout's last set.
-    rest.start(restSeconds);
 
     try {
-      await commitSet({ workoutId, setId, actual });
+      await commitSet({ workoutId, setId: set.id, actual });
     } catch {
       setSets(snapshot);
-      setActiveSetId(setId);
-      rest.skip();
-      alert("Couldn't save that set — please try again.");
+      if (!wasLogged) rest.skip();
+      fail("Couldn't save that set — try again.");
     }
   }
 
-  async function handleEdit(setId: string, actual: Actual) {
+  async function handleUnlog(set: SessionSet) {
     const snapshot = sets;
-    const current = sets.find((s) => s.id === setId);
-    if (!current) return;
-    // Logging any set (including one not yet reached) marks it complete.
-    const logged = sets.map((s) => (s.id === setId ? { ...s, actual, completed: true } : s));
-    setSets(carryWeight(logged, current, actual.weight));
-    setOpenSetId(null);
+    setSets(sets.map((s) => (s.id === set.id ? { ...s, completed: false, actual: null } : s)));
+    setDrafts((prev) => ({
+      ...prev,
+      [set.id]: { weight: String(set.actual?.weight ?? set.targetWeight), reps: String(set.actual?.reps ?? set.targetReps) },
+    }));
     try {
-      await editSet({ workoutId, setId, actual });
+      await uncommitSet({ workoutId, setId: set.id });
     } catch {
       setSets(snapshot);
-      alert("Couldn't save your edit — please try again.");
-    }
-  }
-
-  async function handleSkipSet(setId: string) {
-    const idx = sets.findIndex((s) => s.id === setId);
-    if (idx === -1) return;
-    const current = sets[idx];
-
-    const updated = sets.map((s) =>
-      s.id === setId ? { ...s, completed: true, actual: null } : s,
-    );
-    const nextActive =
-      updated.find(
-        (s, i) => i > idx && s.exerciseName === current.exerciseName && !s.completed,
-      ) ?? updated.find((s) => !s.completed) ?? null;
-
-    const snapshot = sets;
-    setSets(updated);
-    setActiveSetId(nextActive?.id ?? null);
-    setOpenSetId(null);
-    if (nextActive) {
-      setExpanded((prev) =>
-        prev.has(nextActive.exerciseName) ? prev : new Set(prev).add(nextActive.exerciseName),
-      );
-    }
-    rest.start(restSeconds);
-    try {
-      await skipSet({ workoutId, setId });
-    } catch {
-      setSets(snapshot);
-      setActiveSetId(setId);
-      alert("Couldn't skip that set — please try again.");
+      fail("Couldn't undo that set — try again.");
     }
   }
 
   async function handleSkipExercise(exerciseName: string) {
-    const updated = sets.map((s) =>
-      s.exerciseName === exerciseName && !s.completed
-        ? { ...s, completed: true, actual: null }
-        : s,
-    );
-    const nextActive = updated.find((s) => !s.completed) ?? null;
-
     const snapshot = sets;
-    const snapshotActive = activeSetId;
-    setSets(updated);
-    setActiveSetId(nextActive?.id ?? null);
-    setOpenSetId(null);
-    setExpanded((prev) => {
-      const next = new Set(prev);
-      next.delete(exerciseName);
-      if (nextActive) next.add(nextActive.exerciseName);
-      return next;
-    });
+    setSets(sets.map((s) => (s.exerciseName === exerciseName && !s.completed ? { ...s, completed: true } : s)));
+    setCollapsed((prev) => new Set(prev).add(exerciseName));
     try {
       await skipExercise({ workoutId, exerciseName });
     } catch {
       setSets(snapshot);
-      setActiveSetId(snapshotActive);
-      alert("Couldn't skip that exercise — please try again.");
+      fail("Couldn't skip that exercise — try again.");
     }
-  }
-
-  function handleIncrementChange(exerciseName: string, increment: number) {
-    setInfo((prev) => ({ ...prev, [exerciseName]: { ...prev[exerciseName], weightIncrement: increment } }));
-    setExerciseIncrement({ exerciseName, increment }).catch(() => {
-      alert("Couldn't save that weight step — please try again.");
-    });
-  }
-
-  function handleRepRangeChange(exerciseName: string, repRange: RepRange) {
-    setInfo((prev) => ({ ...prev, [exerciseName]: { ...prev[exerciseName], repRange } }));
-    setExerciseRepRange({ exerciseName, ...repRange }).catch(() => {
-      alert("Couldn't save that rep range — please try again.");
-    });
   }
 
   async function handleAddSet(exerciseName: string) {
     try {
       const created = await addSet({ workoutId, exerciseName });
-      const added: SessionSet = { ...created, exerciseName, completed: false, actual: null };
-      // Splice it in after the exercise's existing sets so display order holds.
+      const added: SessionSet = {
+        id: created.id,
+        exerciseName,
+        setNumber: created.setNumber,
+        targetWeight: created.prescribed.weight,
+        targetReps: created.prescribed.targetReps,
+        completed: false,
+        actual: null,
+      };
       const lastIdx = sets.findLastIndex((s) => s.exerciseName === exerciseName);
       setSets([...sets.slice(0, lastIdx + 1), added, ...sets.slice(lastIdx + 1)]);
-      setActiveSetId((prev) => prev ?? added.id);
     } catch {
-      alert("Couldn't add a set — please try again.");
+      fail("Couldn't add a set — try again.");
     }
   }
 
-  async function handleRemoveSet(setId: string) {
-    const snapshot = sets;
-    const target = sets.find((s) => s.id === setId);
+  async function handleRemoveSet(exerciseName: string) {
+    const target = sets.findLast((s) => s.exerciseName === exerciseName && !s.completed);
     if (!target) return;
-    setSets(
-      sets
-        .filter((s) => s.id !== setId)
-        .map((s) =>
-          s.exerciseName === target.exerciseName && s.setNumber > target.setNumber
-            ? { ...s, setNumber: s.setNumber - 1 }
-            : s,
-        ),
-    );
-    if (activeSetId === setId) setActiveSetId(null);
-    setOpenSetId(null);
+    const snapshot = sets;
+    setSets(sets.filter((s) => s.id !== target.id));
     try {
-      await removeSet({ workoutId, setId });
+      await removeSet({ workoutId, setId: target.id });
     } catch {
       setSets(snapshot);
-      alert("Couldn't remove that set — please try again.");
+      fail("Couldn't remove that set — try again.");
     }
+  }
+
+  function handleIncrementChange(exerciseName: string, increment: number | null) {
+    setInfo((prev) => ({ ...prev, [exerciseName]: { ...prev[exerciseName], incrementOverride: increment } }));
+    setExerciseIncrement({ exerciseName, increment }).catch(() => fail("Couldn't save that weight step."));
   }
 
   async function handleSwap(toExercise: string) {
@@ -470,12 +245,11 @@ export function Session({
     setSwapping(true);
     try {
       await swapExercise({ workoutId, fromExercise, toExercise });
-      // The page keys this component on the exercise list — refresh remounts
-      // with the swapped-in exercise's fresh prescription and baseline.
+      // The page keys this component on the exercise list — refresh remounts it.
       startTransition(() => router.refresh());
       setSwapFor(null);
     } catch {
-      alert("Couldn't swap that exercise — please try again.");
+      fail("Couldn't swap that exercise — try again.");
     } finally {
       setSwapping(false);
     }
@@ -486,42 +260,49 @@ export function Session({
     rest.skip();
     try {
       await restartWorkout(workoutId);
-      // startedAt changed → the page remounts this component with fresh props.
       startTransition(() => router.refresh());
     } catch {
-      alert("Couldn't restart the workout — please try again.");
+      fail("Couldn't restart the workout — try again.");
     }
   }
 
   async function handleFinish() {
-    setSheet(null);
     rest.skip();
-    await completeWorkout(workoutId);
-    startTransition(() => router.refresh());
+    try {
+      await completeWorkout(workoutId);
+      startTransition(() => router.refresh());
+    } catch {
+      fail("Couldn't finish the workout — try again.");
+    }
   }
 
-  async function handleAbandon() {
+  async function handleDiscard() {
     setSheet(null);
     rest.skip();
     await abandonWorkout(workoutId);
     router.push("/today");
   }
 
+  const toggle = (name: string) =>
+    setCollapsed((prev) => {
+      const next = new Set(prev);
+      if (next.has(name)) next.delete(name);
+      else next.add(name);
+      return next;
+    });
+
   return (
     <div className="min-h-dvh bg-[var(--surface)]">
       <div className="max-w-md mx-auto">
-        {/* ── Compact sticky deep-teal header ── */}
         <header className="sticky top-0 z-30 bg-[var(--teal)] text-white px-5 pt-3 pb-3 rounded-b-[18px]">
           <div className="flex items-center justify-between gap-3">
-            <p className="truncate text-xs font-medium uppercase tracking-[0.12em] text-white/70">
-              {titleCase(dayName)} day
-            </p>
+            <p className="truncate text-sm font-medium">{title}</p>
             <div className="flex items-center gap-3">
               <button
                 type="button"
                 onClick={togglePause}
                 aria-label={paused ? "Resume workout" : "Pause workout"}
-                className="flex items-center gap-1.5 rounded-full bg-white/15 px-2.5 py-1 text-[11px] font-medium text-white transition-colors hover:bg-white/25"
+                className="flex items-center gap-1.5 rounded-full bg-white/15 px-2.5 py-1 text-[11px] font-medium text-white"
               >
                 {paused ? <Play className="size-3.5" /> : <Pause className="size-3.5" />}
                 {paused ? "Resume" : "Pause"}
@@ -530,119 +311,146 @@ export function Session({
                 type="button"
                 onClick={() => setSheet("menu")}
                 aria-label="Workout options"
-                className="-mr-1 p-1 text-white/60 hover:text-white transition-colors"
+                className="-mr-1 p-1 text-white/60 hover:text-white"
               >
                 <MoreHorizontal className="size-5" />
               </button>
             </div>
           </div>
 
-          <div className="mt-2 flex items-baseline gap-2">
-            <span className="text-2xl font-semibold tabular-nums text-white">{formatVolume(volume)}</span>
-            <span className="text-[11px] uppercase tracking-wide text-white/60">lbs lifted</span>
-          </div>
-
           {rest.active ? (
-            <NavRestTimer
+            <RestBar
               remainingMs={rest.remainingMs}
               durationMs={rest.durationMs}
               onExtend={() => rest.extend(30)}
               onSkip={rest.skip}
             />
           ) : (
-            <div className="mt-2.5 flex items-center justify-between">
-              <div className="flex items-center gap-3.5">
-                <Stat label="Exercises" value={String(byExercise.length)} />
-                <span className="h-3 w-px bg-white/20" />
-                <Stat label="Sets" value={`${completedCount}/${sets.length}`} />
-              </div>
-              <span
-                className={`flex items-center gap-1.5 text-sm font-medium tabular-nums ${
-                  paused ? "text-white/50" : "text-white"
-                }`}
-              >
+            <div className="mt-2 flex items-center justify-between text-sm tabular-nums">
+              <span>
+                <span className="font-medium">{loggedCount}</span>
+                <span className="text-white/60">/{sets.length} sets</span>
+              </span>
+              <span className={cn("flex items-center gap-1.5 font-medium", paused && "text-white/50")}>
                 <Clock className="size-3.5 text-white/55" />
                 {formatDuration(elapsed)}
-                {paused && (
-                  <span className="text-[10px] font-medium uppercase tracking-wide text-white/60">
-                    paused
-                  </span>
-                )}
+                {paused && <span className="text-[10px] uppercase tracking-wide text-white/60">paused</span>}
               </span>
             </div>
           )}
         </header>
 
-        {/* ── Exercise cards ── */}
-        <main className="px-4 py-4 space-y-3 pb-28">
-          {byExercise.map(([exerciseName, exerciseSets]) => {
-            const done = exerciseSets.filter((s) => s.completed).length;
-            const total = exerciseSets.length;
-            const isExpanded = expanded.has(exerciseName);
-            const isActive = exerciseSets.some((s) => s.id === activeSetId);
-            const lead = exerciseSets.find((s) => !s.completed) ?? exerciseSets[0];
+        {error && (
+          <p role="alert" className="mx-4 mt-3 rounded-[10px] bg-[var(--danger-bg)] px-3 py-2 text-sm text-[var(--danger-fg)]">
+            {error}
+          </p>
+        )}
 
+        <main className="px-4 py-4 space-y-3 pb-28">
+          {byExercise.map(([name, list]) => {
+            const ex = info[name];
+            const done = list.filter((s) => s.completed).length;
+            const open = !collapsed.has(name);
+            const moved = ex?.action === "increase" || ex?.action === "decrease" || ex?.action === "ease_back";
+            const last = ex?.sessions[0];
             return (
               <section
-                key={exerciseName}
+                key={name}
                 className="rounded-[12px] bg-white border-[0.5px] border-[color:var(--hairline)] overflow-hidden"
               >
-                <ExerciseHeader
-                  name={exerciseName}
-                  done={done}
-                  total={total}
-                  lead={lead}
-                  note={exerciseSets[0]?.prescribed.rationale}
-                  expanded={isExpanded}
-                  isActive={isActive}
-                  onTap={() => toggleExpanded(exerciseName)}
-                  onInfo={() => setInfoFor(exerciseName)}
-                  onSwap={done < total ? () => setSwapFor(exerciseName) : undefined}
-                />
+                <div className="flex items-start gap-2 px-4 pt-3 pb-2">
+                  <button
+                    type="button"
+                    onClick={() => toggle(name)}
+                    aria-expanded={open}
+                    className="min-w-0 flex-1 text-left"
+                  >
+                    <h2 className="flex items-center gap-2 text-base font-medium">
+                      {name === current && (
+                        <span aria-hidden className="size-1.5 shrink-0 rounded-full bg-[var(--teal)]" />
+                      )}
+                      <span className="truncate">{titleCase(name)}</span>
+                    </h2>
+                    <p className="mt-0.5 text-xs tabular-nums text-muted-foreground">
+                      {ex ? `${ex.sets} × ${ex.repMin}–${ex.repMax}${ex.notes === "per leg" ? " / leg" : ""}` : ""}
+                      {last ? ` · Last ${formatSets(last.sets, ex.equipment)}` : " · First time"}
+                      {!open && ` · ${done}/${list.length} done`}
+                    </p>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setInfoFor(name)}
+                    aria-label={`History and settings for ${titleCase(name)}`}
+                    className="p-1 text-muted-foreground hover:text-[var(--teal)]"
+                  >
+                    <Info className="size-4" />
+                  </button>
+                  {done < list.length && (
+                    <button
+                      type="button"
+                      onClick={() => setSwapFor(name)}
+                      aria-label={`Swap ${titleCase(name)}`}
+                      className="p-1 text-muted-foreground hover:text-[var(--teal)]"
+                    >
+                      <RefreshCw className="size-4" />
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => toggle(name)}
+                    aria-label={open ? "Collapse" : "Expand"}
+                    className="p-1 text-muted-foreground"
+                  >
+                    <ChevronDown className={cn("size-4 transition-transform", open && "rotate-180")} />
+                  </button>
+                </div>
 
-                {isExpanded && (
-                  <div className="border-t border-[color:var(--hairline)]">
-                    {exerciseSets.map((s, i) => {
-                      const last = i === exerciseSets.length - 1;
-                      // A set can only be dropped while more than one remains.
-                      const onRemove =
-                        !s.completed && total > 1 ? () => handleRemoveSet(s.id) : undefined;
-                      if (s.id === activeSetId || s.id === openSetId) {
-                        return (
-                          <ActiveSet
-                            key={s.id}
-                            set={s}
-                            editing={s.id !== activeSetId}
-                            onCommit={(a) =>
-                              s.id === activeSetId ? handleCommit(s.id, a) : handleEdit(s.id, a)
-                            }
-                            onSkip={s.id === activeSetId ? () => handleSkipSet(s.id) : undefined}
-                            onRemove={onRemove}
-                          />
-                        );
-                      }
-                      return <CompactSetRow key={s.id} set={s} divider={!last} onTap={() => setOpenSetId(s.id)} />;
-                    })}
-                    <div className="flex border-t border-[color:var(--hairline)]">
-                      <button
-                        type="button"
-                        onClick={() => handleAddSet(exerciseName)}
-                        className="flex flex-1 items-center justify-center gap-1.5 px-4 py-2.5 text-xs font-medium text-muted-foreground transition-colors hover:text-[var(--teal)]"
+                {open && (
+                  <>
+                    {ex?.rationale && (
+                      <p
+                        className={cn(
+                          "mx-4 mb-2 flex items-start gap-1 text-[11px] leading-snug",
+                          moved ? "text-[var(--teal)]" : "text-muted-foreground",
+                        )}
                       >
-                        <Plus className="size-3.5" />
-                        Add set
+                        {ex.action === "increase" && <ArrowUp className="mt-px size-3 shrink-0" />}
+                        {(ex.action === "decrease" || ex.action === "ease_back") && (
+                          <ArrowDown className="mt-px size-3 shrink-0" />
+                        )}
+                        <span>{ex.rationale}</span>
+                      </p>
+                    )}
+                    <div className="border-t border-[color:var(--hairline)]">
+                      {list.map((s) => (
+                        <SetRow
+                          key={s.id}
+                          set={s}
+                          draft={draftOf(s)}
+                          equipment={ex?.equipment}
+                          onChange={(patch) => setDraft(s.id, patch, draftOf(s))}
+                          dirty={!!drafts[s.id] && !!s.actual}
+                          onLog={() => handleLog(s)}
+                          onUnlog={() => handleUnlog(s)}
+                        />
+                      ))}
+                    </div>
+                    <div className="flex border-t border-[color:var(--hairline)] text-xs font-medium text-muted-foreground">
+                      <button type="button" onClick={() => handleAddSet(name)} className="flex flex-1 items-center justify-center gap-1 py-2.5 hover:text-[var(--teal)]">
+                        <Plus className="size-3.5" /> Set
                       </button>
-                      {done < total && (
-                        <button
-                          type="button"
-                          onClick={() => handleSkipExercise(exerciseName)}
-                          className="flex-1 border-l border-[color:var(--hairline)] px-4 py-2.5 text-center text-xs font-medium text-muted-foreground transition-colors hover:text-foreground"
-                        >
-                          Skip rest
+                      {list.some((s) => !s.completed) && list.length > 1 && (
+                        <button type="button" onClick={() => handleRemoveSet(name)} className="flex-1 border-l border-[color:var(--hairline)] py-2.5 hover:text-foreground">
+                          − Set
+                        </button>
+                      )}
+                      {done < list.length && (
+                        <button type="button" onClick={() => handleSkipExercise(name)} className="flex-1 border-l border-[color:var(--hairline)] py-2.5 hover:text-foreground">
+                          Skip
                         </button>
                       )}
                     </div>
-                  </div>
+                  </>
                 )}
               </section>
             );
@@ -650,62 +458,46 @@ export function Session({
 
           <button
             type="button"
-            disabled={completedCount === 0 || pending}
-            onClick={() => (allDone ? handleFinish() : setSheet("finish"))}
-            className="mt-4 h-12 w-full rounded-[12px] bg-[var(--teal)] text-white text-sm font-medium transition-opacity disabled:opacity-40"
+            disabled={loggedCount === 0 || pending}
+            onClick={handleFinish}
+            className="mt-4 h-12 w-full rounded-[12px] bg-[var(--teal)] text-white text-sm font-medium disabled:opacity-40"
           >
-            {pending
-              ? "Saving…"
-              : allDone
-                ? "Finish workout"
-                : `Finish early (${completedCount}/${sets.length} sets)`}
+            {pending ? "Saving…" : openCount === 0 ? "Finish workout" : `Finish (${openCount} set${openCount === 1 ? "" : "s"} left)`}
           </button>
+          {openCount > 0 && loggedCount > 0 && (
+            <p className="text-center text-[11px] text-muted-foreground">
+              Exercises with unlogged sets won&apos;t count toward progression this time.
+            </p>
+          )}
         </main>
       </div>
 
       {swapFor && (
-        <div
-          className="fixed inset-0 z-50 flex items-end justify-center bg-black/40 px-4 pb-8 animate-in fade-in"
-          onClick={() => !swapping && setSwapFor(null)}
-        >
-          <div
-            className="w-full max-w-sm rounded-[18px] bg-white p-5 shadow-xl"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <h3 className="text-base font-semibold text-foreground">
-              Swap {titleCase(swapFor)}
-            </h3>
-            <p className="mt-1 text-sm text-muted-foreground">
-              Remaining sets are replaced and prescribed from the new exercise&apos;s own numbers.
-            </p>
-            <div className="mt-4 max-h-72 space-y-2 overflow-y-auto">
-              {alternativesFor(swapFor, sets.map((s) => s.exerciseName)).map((alt) => (
-                <button
-                  key={alt}
-                  type="button"
-                  disabled={swapping}
-                  onClick={() => handleSwap(alt)}
-                  className="h-11 w-full rounded-[12px] border-[0.5px] border-[color:var(--hairline)] text-sm font-medium text-foreground transition-colors hover:border-[var(--teal)] disabled:opacity-60"
-                >
-                  {titleCase(alt)}
-                </button>
-              ))}
-              {alternativesFor(swapFor, sets.map((s) => s.exerciseName)).length === 0 && (
-                <p className="py-4 text-center text-sm text-muted-foreground">
-                  No similar exercises to suggest.
-                </p>
-              )}
-            </div>
-            <button
-              type="button"
-              disabled={swapping}
-              onClick={() => setSwapFor(null)}
-              className="mt-3 h-11 w-full rounded-[12px] text-sm font-medium text-muted-foreground disabled:opacity-60"
-            >
-              {swapping ? "Swapping…" : "Keep it"}
-            </button>
+        <BottomSheet onClose={() => !swapping && setSwapFor(null)}>
+          <h3 className="text-base font-semibold">Swap {titleCase(swapFor)}</h3>
+          <p className="mt-1 text-sm text-muted-foreground">
+            Same sets and rep range, starting from the new exercise&apos;s own history.
+          </p>
+          <div className="mt-4 max-h-72 space-y-2 overflow-y-auto">
+            {alternativesFor(swapFor, sets.map((s) => s.exerciseName)).map((alt) => (
+              <button
+                key={alt}
+                type="button"
+                disabled={swapping}
+                onClick={() => handleSwap(alt)}
+                className="h-11 w-full rounded-[12px] border-[0.5px] border-[color:var(--hairline)] text-sm font-medium hover:border-[var(--teal)] disabled:opacity-60"
+              >
+                {titleCase(alt)}
+              </button>
+            ))}
+            {alternativesFor(swapFor, sets.map((s) => s.exerciseName)).length === 0 && (
+              <p className="py-4 text-center text-sm text-muted-foreground">No similar exercises to suggest.</p>
+            )}
           </div>
-        </div>
+          <SheetButton onClick={() => setSwapFor(null)} disabled={swapping}>
+            {swapping ? "Swapping…" : "Keep it"}
+          </SheetButton>
+        </BottomSheet>
       )}
 
       {infoFor && info[infoFor] && (
@@ -714,115 +506,136 @@ export function Session({
           info={info[infoFor]}
           onClose={() => setInfoFor(null)}
           onIncrementChange={(inc) => handleIncrementChange(infoFor, inc)}
-          onRepRangeChange={(range) => handleRepRangeChange(infoFor, range)}
         />
       )}
 
       {sheet && (
-        <div
-          className="fixed inset-0 z-50 flex items-end justify-center bg-black/40 px-4 pb-8 animate-in fade-in"
-          onClick={() => setSheet(null)}
-        >
-          <div
-            className="w-full max-w-sm rounded-[18px] bg-white p-5 shadow-xl"
-            onClick={(e) => e.stopPropagation()}
-          >
-            {sheet === "menu" && (
-              <>
-                <h3 className="text-base font-semibold text-foreground">Workout options</h3>
-                <div className="mt-4 space-y-2">
-                  <button
-                    type="button"
-                    onClick={() => setSheet("restart")}
-                    className="h-11 w-full rounded-[12px] border-[0.5px] border-[color:var(--hairline)] text-sm font-medium text-foreground"
-                  >
-                    Restart workout
-                  </button>
-                  <button
-                    type="button"
-                    onClick={handleAbandon}
-                    className="h-11 w-full rounded-[12px] bg-[var(--feel-hard-bg)] text-sm font-medium text-[var(--feel-hard-fg)]"
-                  >
-                    Quit workout
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setSheet(null)}
-                    className="h-11 w-full rounded-[12px] text-sm font-medium text-muted-foreground"
-                  >
-                    Keep going
-                  </button>
-                </div>
-              </>
-            )}
-
-            {sheet === "restart" && (
-              <>
-                <h3 className="text-base font-semibold text-foreground">Restart this workout?</h3>
-                <p className="mt-1 text-sm text-muted-foreground">
-                  All logged sets will be cleared and the clock starts over.
-                </p>
-                <div className="mt-4 flex gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setSheet(null)}
-                    className="h-11 flex-1 rounded-[12px] border-[0.5px] border-[color:var(--hairline)] text-sm font-medium text-foreground"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    type="button"
-                    onClick={handleRestart}
-                    className="h-11 flex-1 rounded-[12px] bg-[var(--feel-hard-bg)] text-sm font-medium text-[var(--feel-hard-fg)]"
-                  >
-                    Restart
-                  </button>
-                </div>
-              </>
-            )}
-
-            {sheet === "finish" && (
-              <>
-                <h3 className="text-base font-semibold text-foreground">Finish early?</h3>
-                <p className="mt-1 text-sm text-muted-foreground">
-                  {sets.length - completedCount} set{sets.length - completedCount === 1 ? "" : "s"} left
-                  — they&apos;ll show as skipped in your summary.
-                </p>
-                <div className="mt-4 flex gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setSheet(null)}
-                    className="h-11 flex-1 rounded-[12px] border-[0.5px] border-[color:var(--hairline)] text-sm font-medium text-foreground"
-                  >
-                    Keep going
-                  </button>
-                  <button
-                    type="button"
-                    onClick={handleFinish}
-                    className="h-11 flex-1 rounded-[12px] bg-[var(--teal)] text-sm font-medium text-white"
-                  >
-                    Finish workout
-                  </button>
-                </div>
-              </>
-            )}
-          </div>
-        </div>
+        <BottomSheet onClose={() => setSheet(null)}>
+          {sheet === "menu" && (
+            <div className="space-y-2">
+              <SheetButton outline onClick={() => setSheet("restart")}>Restart workout</SheetButton>
+              <SheetButton danger onClick={() => setSheet("discard")}>Discard workout</SheetButton>
+              <SheetButton onClick={() => setSheet(null)}>Keep going</SheetButton>
+            </div>
+          )}
+          {sheet === "restart" && (
+            <>
+              <h3 className="text-base font-semibold">Restart this workout?</h3>
+              <p className="mt-1 text-sm text-muted-foreground">Logged sets are cleared and the clock starts over.</p>
+              <div className="mt-4 flex gap-2">
+                <SheetButton outline onClick={() => setSheet(null)}>Cancel</SheetButton>
+                <SheetButton danger onClick={handleRestart}>Restart</SheetButton>
+              </div>
+            </>
+          )}
+          {sheet === "discard" && (
+            <>
+              <h3 className="text-base font-semibold">Discard this workout?</h3>
+              <p className="mt-1 text-sm text-muted-foreground">
+                Nothing from it counts toward progress, and your rotation stays where it was.
+              </p>
+              <div className="mt-4 flex gap-2">
+                <SheetButton outline onClick={() => setSheet(null)}>Cancel</SheetButton>
+                <SheetButton danger onClick={handleDiscard}>Discard</SheetButton>
+              </div>
+            </>
+          )}
+        </BottomSheet>
       )}
     </div>
   );
 }
 
-function Stat({ label, value }: { label: string; value: string }) {
+function SetRow({
+  set,
+  draft,
+  equipment,
+  dirty,
+  onChange,
+  onLog,
+  onUnlog,
+}: {
+  set: SessionSet;
+  draft: Draft;
+  equipment?: string;
+  /** Logged, then edited — the check saves the edit. */
+  dirty: boolean;
+  onChange: (patch: Partial<Draft>) => void;
+  onLog: () => void;
+  onUnlog: () => void;
+}) {
+  const logged = set.actual !== null;
+  const skipped = set.completed && !logged;
+  const field =
+    "h-11 w-full rounded-[10px] border-[0.5px] border-[color:var(--hairline)] bg-[#fafaf9] text-center text-lg font-medium tabular-nums outline-none focus:border-[var(--teal)] focus:ring-2 focus:ring-[var(--teal)]/15";
+
+  if (skipped) {
+    return (
+      <div className="flex items-center justify-between px-4 py-2.5 text-sm text-muted-foreground border-b border-[color:var(--hairline)] last:border-0">
+        <span>Set {set.setNumber}</span>
+        <span>Skipped</span>
+      </div>
+    );
+  }
+
   return (
-    <div className="flex items-baseline gap-1.5">
-      <span className="text-base font-medium tabular-nums text-white">{value}</span>
-      <span className="text-[11px] uppercase tracking-wide text-white/55">{label}</span>
+    <div
+      className={cn(
+        "grid grid-cols-[2rem_1fr_auto_1fr_3rem] items-center gap-2 px-4 py-2 border-b border-[color:var(--hairline)] last:border-0",
+        logged && !dirty && "bg-[var(--teal)]/[0.04]",
+      )}
+    >
+      <span className="text-sm tabular-nums text-muted-foreground">{set.setNumber}</span>
+      <label className="block">
+        <span className="sr-only">Set {set.setNumber} weight</span>
+        <input
+          type="text"
+          inputMode="decimal"
+          value={draft.weight}
+          onChange={(e) => onChange({ weight: e.target.value.replace(/[^\d.\-−]/g, "").slice(0, 6) })}
+          onFocus={(e) => e.target.select()}
+          className={field}
+        />
+      </label>
+      <span className="text-xs text-muted-foreground">
+        {equipment === "bodyweight" ? "+lb ×" : equipment === "dumbbell" ? "lb ea ×" : "lb ×"}
+      </span>
+      <label className="block">
+        <span className="sr-only">Set {set.setNumber} reps</span>
+        <input
+          type="text"
+          inputMode="numeric"
+          value={draft.reps}
+          placeholder={String(set.targetReps)}
+          onChange={(e) => onChange({ reps: e.target.value.replace(/[^\d]/g, "").slice(0, 2) })}
+          onFocus={(e) => e.target.select()}
+          className={field}
+        />
+      </label>
+      <button
+        type="button"
+        onClick={logged && !dirty ? onUnlog : onLog}
+        aria-label={logged && !dirty ? `Undo set ${set.setNumber}` : `Log set ${set.setNumber}`}
+        aria-pressed={logged && !dirty}
+        className={cn(
+          "flex h-11 w-12 items-center justify-center rounded-[10px] border-[0.5px] transition-colors touch-manipulation",
+          logged && !dirty
+            ? "border-[var(--teal)] bg-[var(--teal)] text-white"
+            : "border-[color:var(--hairline)] text-muted-foreground active:bg-[var(--teal)]/10",
+        )}
+      >
+        <Check className="size-5" strokeWidth={2.5} />
+      </button>
+      {!logged && set.targetWeight !== Number(draft.weight) && (
+        <span className="col-span-5 -mt-1 text-[10px] text-muted-foreground">
+          Recommended {formatWeight(set.targetWeight, equipment)}
+        </span>
+      )}
     </div>
   );
 }
 
-function NavRestTimer({
+function RestBar({
   remainingMs,
   durationMs,
   onExtend,
@@ -834,323 +647,66 @@ function NavRestTimer({
   onSkip: () => void;
 }) {
   const pct = durationMs > 0 ? Math.min(100, (remainingMs / durationMs) * 100) : 0;
-  const btn =
-    "rounded-full bg-white/15 px-2.5 py-1 text-[11px] font-medium text-white transition-colors hover:bg-white/25";
+  const btn = "rounded-full bg-white/15 px-2.5 py-1 text-[11px] font-medium text-white";
   return (
-    <div className="mt-2.5 rounded-[12px] border-[0.5px] border-white/15 bg-white/10 px-3 py-2">
+    <div className="mt-2 rounded-[12px] bg-white/10 px-3 py-2">
       <div className="flex items-center justify-between gap-3">
         <div className="flex items-center gap-2">
           <Timer className="size-3.5 text-white/60" />
-          <span className="text-[11px] font-medium uppercase tracking-wide text-white/65">Rest</span>
-          <span className="text-base font-medium tabular-nums text-white">
-            {formatDuration(Math.ceil(remainingMs / 1000))}
-          </span>
+          <span className="text-[11px] uppercase tracking-wide text-white/65">Rest</span>
+          <span className="text-base font-medium tabular-nums">{formatDuration(Math.ceil(remainingMs / 1000))}</span>
         </div>
         <div className="flex items-center gap-1.5">
-          <button type="button" onClick={onExtend} className={btn}>
-            +30s
-          </button>
-          <button type="button" onClick={onSkip} className={btn}>
-            Skip
-          </button>
+          <button type="button" onClick={onExtend} className={btn}>+30s</button>
+          <button type="button" onClick={onSkip} className={btn}>Skip</button>
         </div>
       </div>
       <div className="mt-2 h-1 overflow-hidden rounded-full bg-white/15">
-        <div
-          className="h-full rounded-full bg-white transition-[width] duration-300 ease-linear"
-          style={{ width: `${pct}%` }}
-        />
+        <div className="h-full rounded-full bg-white transition-[width] duration-300 ease-linear" style={{ width: `${pct}%` }} />
       </div>
     </div>
   );
 }
 
-function ExerciseHeader({
-  name,
-  done,
-  total,
-  lead,
-  note,
-  expanded,
-  isActive,
-  onTap,
-  onInfo,
-  onSwap,
-}: {
-  name: string;
-  done: number;
-  total: number;
-  lead: SessionSet;
-  /** Why today's target is what it is — carried on the exercise's first set. */
-  note?: string;
-  expanded: boolean;
-  isActive: boolean;
-  onTap: () => void;
-  onInfo: () => void;
-  onSwap?: () => void;
-}) {
-  // A div-with-button-role, not a <button>: the info and swap controls nest
-  // inside and interactive elements must not contain each other.
+function BottomSheet({ onClose, children }: { onClose: () => void; children: React.ReactNode }) {
   return (
     <div
-      role="button"
-      tabIndex={0}
-      onClick={onTap}
-      onKeyDown={(e) => {
-        if (e.key === "Enter" || e.key === " ") {
-          e.preventDefault();
-          onTap();
-        }
-      }}
-      aria-expanded={expanded}
-      className="w-full flex cursor-pointer items-center justify-between gap-3 px-4 py-3 text-left"
+      className="fixed inset-0 z-50 flex items-end justify-center bg-black/40 px-4 pb-8 animate-in fade-in"
+      onClick={onClose}
     >
-      <div className="min-w-0">
-        <h2 className="flex items-center gap-2 text-base font-medium text-foreground">
-          {isActive && (
-            <span aria-hidden className="size-1.5 shrink-0 rounded-full bg-[var(--teal)]" />
-          )}
-          <span className="truncate">{titleCase(name)}</span>
-          <button
-            type="button"
-            onClick={(e) => {
-              e.stopPropagation();
-              onInfo();
-            }}
-            aria-label={`What I did last time on ${titleCase(name)}`}
-            className="inline-flex size-4 shrink-0 items-center justify-center rounded-full border border-[var(--teal)] text-[10px] font-bold text-[var(--teal)]"
-          >
-            i
-          </button>
-          {onSwap && (
-            <button
-              type="button"
-              onClick={(e) => {
-                e.stopPropagation();
-                onSwap();
-              }}
-              aria-label={`Swap ${titleCase(name)} for a similar exercise`}
-              className="p-1 text-muted-foreground/60 transition-colors hover:text-[var(--teal)]"
-            >
-              <RefreshCw className="size-3.5" />
-            </button>
-          )}
-        </h2>
-        <p className="mt-0.5 text-xs font-normal text-muted-foreground tabular-nums">
-          {done} of {total} sets · {lead.prescribed.targetReps} × {lead.prescribed.weight} lbs
-        </p>
-        {note && <p className="mt-1 text-[11px] leading-snug text-[var(--teal)]">{note}</p>}
+      <div className="w-full max-w-sm rounded-[18px] bg-white p-5 shadow-xl" onClick={(e) => e.stopPropagation()}>
+        {children}
       </div>
-      <ChevronDown
-        className={`size-5 shrink-0 text-muted-foreground transition-transform ${
-          expanded ? "rotate-180" : ""
-        }`}
-      />
     </div>
   );
 }
 
-function CompactSetRow({ set, divider, onTap }: { set: SessionSet; divider: boolean; onTap?: () => void }) {
-  const done = set.completed && set.actual;
-  const skipped = set.completed && !set.actual;
-  const inner = (
-    <>
-      <span className="flex items-center gap-2 font-normal text-muted-foreground">
-        {done && <Check className="size-3.5" style={{ color: "var(--teal)" }} />}
-        Set {set.setNumber}
-      </span>
-      <span className="flex items-center gap-2 tabular-nums text-muted-foreground">
-        {done
-          ? `${set.actual!.reps} × ${set.actual!.weight} lbs`
-          : skipped
-            ? "Skipped"
-            : `${set.prescribed.targetReps} × ${set.prescribed.weight} lbs`}
-        {done && (
-          <span
-            aria-hidden
-            className="size-1.5 rounded-full"
-            style={{ backgroundColor: feelColor[set.actual!.feeling] }}
-          />
-        )}
-        {onTap && <ChevronRight className="size-3.5 text-muted-foreground/50" />}
-      </span>
-    </>
-  );
-
-  if (onTap) {
-    return (
-      <button
-        type="button"
-        onClick={onTap}
-        className={`w-full flex items-center justify-between px-4 py-3 text-sm text-left ${
-          divider ? "border-b border-[color:var(--hairline)]" : ""
-        }`}
-      >
-        {inner}
-      </button>
-    );
-  }
-
-  return (
-    <div
-      className={`w-full flex items-center justify-between px-4 py-3 text-sm ${
-        divider ? "border-b border-[color:var(--hairline)]" : ""
-      }`}
-    >
-      {inner}
-    </div>
-  );
-}
-
-function ActiveSet({
-  set,
-  editing,
-  onCommit,
-  onSkip,
-  onRemove,
+function SheetButton({
+  onClick,
+  disabled,
+  outline,
+  danger,
+  children,
 }: {
-  set: SessionSet;
-  editing?: boolean;
-  onCommit: (actual: Actual) => Promise<void>;
-  onSkip?: () => void;
-  onRemove?: () => void;
+  onClick: () => void;
+  disabled?: boolean;
+  outline?: boolean;
+  danger?: boolean;
+  children: React.ReactNode;
 }) {
-  // String-backed so typing is intuitive: no forced leading zeros, can be
-  // briefly empty, and focusing selects the whole value to overwrite. Whatever
-  // ends up here is the log — the target is only ever a starting point.
-  const [reps, setReps] = useState(String((editing ? set.actual?.reps : undefined) ?? set.prescribed.targetReps));
-  const [weight, setWeight] = useState(String((editing ? set.actual?.weight : undefined) ?? set.prescribed.weight));
-  const [submitting, setSubmitting] = useState<Feeling | null>(null);
-
-  const onRepsChange = (e: React.ChangeEvent<HTMLInputElement>) =>
-    setReps(e.target.value.replace(/[^\d]/g, "").slice(0, 2));
-
-  const onWeightChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    let v = e.target.value.replace(/[^\d.]/g, "");
-    const dot = v.indexOf(".");
-    if (dot !== -1) v = v.slice(0, dot + 1) + v.slice(dot + 1).replace(/\./g, "");
-    setWeight(v.slice(0, 6));
-  };
-
-  const commit = async (feeling: Feeling) => {
-    const repsNum = Math.max(0, Math.round(Number(reps) || 0));
-    const weightNum = Math.max(0, Number(weight) || 0);
-    setSubmitting(feeling);
-    try {
-      await onCommit({ reps: repsNum, weight: weightNum, feeling });
-    } finally {
-      setSubmitting(null);
-    }
-  };
-
-  const numberField =
-    "w-full h-16 rounded-[12px] border-[0.5px] border-[color:var(--hairline)] bg-[#fafaf9] text-center text-3xl font-medium text-foreground outline-none transition-colors focus:border-[var(--teal)] focus:ring-2 focus:ring-[var(--teal)]/15";
-
-  return (
-    <div className="px-4 py-4">
-      <div className="flex items-center justify-between">
-        <p className="text-[11px] font-normal uppercase tracking-wide text-muted-foreground">
-          Set {set.setNumber} · going for {set.prescribed.targetReps} × {set.prescribed.weight}
-        </p>
-        <span className="rounded-full bg-[var(--teal)]/10 px-2 py-0.5 text-[11px] font-medium text-[var(--teal)]">
-          {editing ? "editing" : "active"}
-        </span>
-      </div>
-
-      <div className="mt-3 grid grid-cols-2 gap-3">
-        <label className="block">
-          <span className="block text-center text-[11px] font-normal uppercase tracking-wide text-muted-foreground">
-            Reps
-          </span>
-          <input
-            type="text"
-            inputMode="numeric"
-            value={reps}
-            onChange={onRepsChange}
-            onFocus={(e) => e.target.select()}
-            className={`mt-1.5 ${numberField}`}
-          />
-        </label>
-        <label className="block">
-          <span className="block text-center text-[11px] font-normal uppercase tracking-wide text-muted-foreground">
-            Weight (lbs)
-          </span>
-          <input
-            type="text"
-            inputMode="decimal"
-            value={weight}
-            onChange={onWeightChange}
-            onFocus={(e) => e.target.select()}
-            className={`mt-1.5 ${numberField}`}
-          />
-        </label>
-      </div>
-
-      <p className="mt-4 mb-2 text-[11px] font-normal uppercase tracking-wide text-muted-foreground">
-        How did it feel?
-      </p>
-      <div className="grid grid-cols-3 gap-2">
-        <FeelChip label="Hard" feeling="red" submitting={submitting} onPick={commit} />
-        <FeelChip label="Okay" feeling="yellow" submitting={submitting} onPick={commit} />
-        <FeelChip label="Easy" feeling="green" submitting={submitting} onPick={commit} />
-      </div>
-
-      {(onSkip || onRemove) && (
-        <div className="mt-3 flex items-center justify-center gap-4 text-xs font-medium text-muted-foreground">
-          {onSkip && (
-            <button
-              type="button"
-              disabled={submitting !== null}
-              onClick={onSkip}
-              className="transition-colors hover:text-foreground disabled:opacity-60"
-            >
-              Skip this set
-            </button>
-          )}
-          {onSkip && onRemove && <span aria-hidden className="h-3 w-px bg-[var(--hairline)]" />}
-          {onRemove && (
-            <button
-              type="button"
-              disabled={submitting !== null}
-              onClick={onRemove}
-              className="transition-colors hover:text-[var(--feel-hard-fg)] disabled:opacity-60"
-            >
-              Remove set
-            </button>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function FeelChip({
-  label,
-  feeling,
-  submitting,
-  onPick,
-}: {
-  label: string;
-  feeling: Feeling;
-  submitting: Feeling | null;
-  onPick: (feeling: Feeling) => void;
-}) {
-  const palette: Record<Feeling, string> = {
-    red: "bg-[var(--feel-hard-bg)] text-[var(--feel-hard-fg)] border-[color:var(--feel-hard-border)]",
-    yellow: "bg-[var(--feel-okay-bg)] text-[var(--feel-okay-fg)] border-[color:var(--feel-okay-border)]",
-    green: "bg-[var(--teal)] text-white border-[color:var(--teal)]",
-  };
   return (
     <button
       type="button"
-      disabled={submitting !== null}
-      onClick={() => onPick(feeling)}
-      aria-label={label}
-      className={`h-12 rounded-[12px] border-[0.5px] text-sm font-medium transition-opacity disabled:opacity-60 ${palette[feeling]} ${
-        submitting === feeling ? "opacity-70" : ""
-      }`}
+      onClick={onClick}
+      disabled={disabled}
+      className={cn(
+        "h-11 w-full flex-1 rounded-[12px] text-sm font-medium disabled:opacity-60",
+        outline && "border-[0.5px] border-[color:var(--hairline)]",
+        danger && "bg-[var(--danger-bg)] text-[var(--danger-fg)]",
+        !outline && !danger && "mt-3 text-muted-foreground",
+      )}
     >
-      {label}
+      {children}
     </button>
   );
 }

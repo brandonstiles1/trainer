@@ -1,8 +1,7 @@
-import { feelFromFeeling } from "@/lib/engine/feel";
-import type { LoggedSet } from "@/lib/engine/progression";
+import type { LoggedSet, SessionLog } from "@/lib/engine/double-progression";
 import type { StoredActual, StoredPrescribed } from "./stored-set";
 
-/** A workout_sets row joined to its workout, as the history queries return it. */
+/** A workout_sets row joined to its (finished) workout, as the history queries return it. */
 export type HistoryRow = {
   workoutId: string;
   exerciseName: string;
@@ -12,92 +11,65 @@ export type HistoryRow = {
   finishedAt: Date | null;
 };
 
-/** One past session of a single exercise: what was asked for, what was done. */
-export type ExerciseSession = {
+/** One past session of a single exercise. */
+export type ExerciseSession = SessionLog & {
   workoutId: string;
-  finishedAt: Date | null;
-  sets: LoggedSet[];
-  /**
-   * Sets the exercise was carrying that session, skipped ones included. Set
-   * count carries forward on this rather than on `sets.length`, so skipping
-   * your last set doesn't quietly shrink the exercise next time.
-   */
-  plannedSets: number;
+  /** Every logged set, prescribed or extra — for history and PRs. */
+  allSets: LoggedSet[];
+  /** The rep range the session was prescribed, when the row recorded it. */
+  repRange: { min: number; max: number } | null;
 };
 
+const isNum = (n: unknown): n is number => typeof n === "number" && Number.isFinite(n);
+
 /**
- * Group one exercise's rows into finished sessions, newest first. Skipped sets
- * (no actual) are dropped — they did no work — and a session that ends up empty
- * is dropped with them, so "last time" always means the last time you lifted.
+ * Group one exercise's rows into finished sessions, newest first.
+ *
+ * A session is *complete* when each of its prescribed working sets — the first
+ * `slotSets` by set number — was logged with real numbers. Only those sets are
+ * handed to progression; anything added on top shows in history but isn't
+ * judged. Sessions with nothing logged at all are dropped.
  */
 export function groupExerciseSessions(rows: HistoryRow[], exerciseName: string): ExerciseSession[] {
-  type Building = {
-    workoutId: string;
-    finishedAt: Date | null;
-    plannedSets: number;
-    sets: Array<LoggedSet & { setNumber: number }>;
-  };
-  const byWorkout = new Map<string, Building>();
-
+  const byWorkout = new Map<string, HistoryRow[]>();
   for (const row of rows) {
-    if (row.exerciseName !== exerciseName) continue;
-    let session = byWorkout.get(row.workoutId);
-    if (!session) {
-      session = { workoutId: row.workoutId, finishedAt: row.finishedAt, plannedSets: 0, sets: [] };
-      byWorkout.set(row.workoutId, session);
-    }
-    session.plannedSets++;
-    if (!row.actual) continue;
-    session.sets.push({
-      setNumber: row.setNumber,
-      targetReps: row.prescribed.targetReps ?? row.prescribed.reps,
-      weight: row.actual.weight,
-      reps: row.actual.reps,
-      feel: feelFromFeeling(row.actual.feeling),
-    });
+    if (row.exerciseName !== exerciseName || !row.finishedAt) continue;
+    const list = byWorkout.get(row.workoutId) ?? [];
+    list.push(row);
+    byWorkout.set(row.workoutId, list);
   }
 
-  return [...byWorkout.values()]
-    .filter((s) => s.sets.length > 0)
-    .sort((a, b) => (b.finishedAt?.getTime() ?? 0) - (a.finishedAt?.getTime() ?? 0))
-    .map((s) => ({
-      workoutId: s.workoutId,
-      finishedAt: s.finishedAt,
-      plannedSets: s.plannedSets,
-      // Set order is load-bearing: targets carry forward position for position.
-      sets: s.sets
-        .sort((a, b) => a.setNumber - b.setNumber)
-        .map((set) => ({ targetReps: set.targetReps, weight: set.weight, reps: set.reps, feel: set.feel })),
-    }));
-}
+  const sessions: ExerciseSession[] = [];
+  for (const [workoutId, list] of byWorkout) {
+    list.sort((a, b) => a.setNumber - b.setNumber);
+    const logged = (r: HistoryRow) => r.actual !== null && isNum(r.actual.weight) && isNum(r.actual.reps);
+    const allSets = list.filter(logged).map((r) => ({ weight: r.actual!.weight, reps: r.actual!.reps }));
+    if (allSets.length === 0) continue;
 
-/** The target a session was chasing: its heaviest load at its highest rep target. */
-function signatureOf(session: ExerciseSession): string {
-  const weight = Math.max(...session.sets.map((s) => s.weight));
-  const reps = Math.max(...session.sets.map((s) => s.targetReps));
-  return `${weight}x${reps}`;
-}
+    const declared = Math.max(0, ...list.map((r) => r.prescribed?.slotSets ?? 0));
+    const slotSets = declared > 0 ? declared : list.length;
+    const prescribed = list.slice(0, slotSets);
+    const first = list[0].prescribed;
 
-/**
- * How many sessions before the newest one were chasing the same target — the
- * count of times progression has already stalled here. Zero means the last
- * session was the first at this target.
- */
-export function consecutiveSameTarget(sessions: ExerciseSession[]): number {
-  if (sessions.length === 0) return 0;
-  const newest = signatureOf(sessions[0]);
-  let count = 0;
-  for (let i = 1; i < sessions.length && signatureOf(sessions[i]) === newest; i++) count++;
-  return count;
+    sessions.push({
+      workoutId,
+      finishedAt: list[0].finishedAt!,
+      complete: prescribed.length === slotSets && prescribed.every(logged),
+      sets: prescribed.filter(logged).map((r) => ({ weight: r.actual!.weight, reps: r.actual!.reps })),
+      allSets,
+      repRange: first?.repMin && first?.repMax ? { min: first.repMin, max: first.repMax } : null,
+    });
+  }
+  return sessions.sort((a, b) => b.finishedAt.getTime() - a.finishedAt.getTime());
 }
 
 /** Heaviest set ever logged, tie-broken by reps — the exercise's standing PR. */
 export function personalRecord(
-  sessions: ExerciseSession[],
+  sessions: Array<Pick<ExerciseSession, "allSets">>,
 ): { weight: number; reps: number } | null {
   let best: { weight: number; reps: number } | null = null;
   for (const session of sessions) {
-    for (const set of session.sets) {
+    for (const set of session.allSets) {
       if (!best || set.weight > best.weight || (set.weight === best.weight && set.reps > best.reps)) {
         best = { weight: set.weight, reps: set.reps };
       }

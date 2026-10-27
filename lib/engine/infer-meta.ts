@@ -18,8 +18,10 @@ export function inferExerciseMeta(name: string): ExerciseMeta {
     "muscle_up", "hanging", "leg_raise", "nordic",
   )
     ? "bodyweight"
-    : has("machine", "cable", "smith") // explicit equipment always wins
+    : has("machine", "cable", "smith", "rope", "pec_deck", "pulldown", "leg_curl", "leg_extension") // explicit equipment always wins
       ? "machine"
+      : has("dumbbell", "db") // "dumbbell_bench_press" is a dumbbell lift, not a barbell one
+        ? "dumbbell"
       : has("barbell", "bench", "squat", "deadlift", "rdl", "ohp", "overhead", "military", "clean", "snatch", "hip_thrust", "good_morning")
         ? "barbell"
         : has("dumbbell", "db", "goblet", "curl", "lateral_raise", "front_raise", "rear_delt", "arnold", "shrug", "kickback")
@@ -49,5 +51,7 @@ export function inferExerciseMeta(name: string): ExerciseMeta {
     muscleGroups.push("core");
   if (muscleGroups.length === 0) muscleGroups.push("full_body");
 
-  return defaultExerciseMeta({ type, isCompound, muscleGroups });
+  const isLowerBody = muscleGroups.includes("legs") && !muscleGroups.includes("core");
+
+  return defaultExerciseMeta({ type, isCompound, isLowerBody, muscleGroups });
 }

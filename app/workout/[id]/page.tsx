@@ -1,17 +1,22 @@
 import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import { db } from "@/lib/db";
-import { workouts, workoutSets, profiles } from "@/lib/db/schema";
+import { workouts, workoutSets } from "@/lib/db/schema";
 import { and, asc, eq } from "drizzle-orm";
-import { inferExerciseMeta } from "@/lib/engine/infer-meta";
-import {
-  exercisePreferencesFor,
-  planExerciseOrder,
-  recentSessionsFor,
-} from "@/lib/workouts/log-book";
+import { metaFor } from "@/lib/program/structure";
+import { incrementFor, restFor } from "@/lib/program/settings";
 import { personalRecord } from "@/lib/workouts/exercise-history";
+import type { StoredActual, StoredPrescribed } from "@/lib/workouts/stored-set";
+import type { SlotSpec } from "@/lib/workouts/prescribe";
+import {
+  activeProgramFor,
+  incrementOverridesFor,
+  prescribeSlots,
+  recentSessionsFor,
+  settingsFor,
+} from "@/lib/workouts/log-book";
 import { Session, type ExerciseInfo, type SessionSet } from "./session";
-import { Summary } from "@/components/workout/summary";
+import { Summary, type SummaryExercise } from "@/components/workout/summary";
 
 export default async function WorkoutPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
@@ -30,71 +35,98 @@ export default async function WorkoutPage({ params }: { params: Promise<{ id: st
     .select()
     .from(workoutSets)
     .where(eq(workoutSets.workoutId, id))
-    .orderBy(asc(workoutSets.setNumber));
+    .orderBy(asc(workoutSets.exerciseOrder), asc(workoutSets.setNumber));
 
-  // exercise_order wins (it survives mid-workout swaps); rows predating the
-  // column are all 0 and fall through to plan-day order.
-  const planOrder = new Map(
-    (await planExerciseOrder(workout.planId, workout.dayKey)).map((name, i) => [name, i]),
-  );
-  const sortedRows = [...rows].sort((a, b) => {
-    if (a.exerciseOrder !== b.exerciseOrder) return a.exerciseOrder - b.exerciseOrder;
-    const ao = planOrder.get(a.exerciseName) ?? 999;
-    const bo = planOrder.get(b.exerciseName) ?? 999;
-    if (ao !== bo) return ao - bo;
-    return a.setNumber - b.setNumber;
-  });
+  const { program } = await activeProgramFor(user.id);
+  const day = program.days.find((d) => d.category === workout.dayKey);
+  const title =
+    workout.dayKey === "custom"
+      ? "Extra · Custom session"
+      : `${workout.isExtra ? "Extra · " : ""}${day ? `${day.day} · ${day.title}` : workout.dayKey.replace(/_/g, " ")}`;
+
+  const exerciseNames = [...new Set(rows.map((r) => r.exerciseName))];
+  const routineEntry = (name: string) => program.days.flatMap((d) => d.exercises).find((e) => e.name === name);
+
+  /** The slot an exercise was prescribed as, read back off its rows. */
+  const specOf = (name: string): SlotSpec => {
+    const mine = rows.filter((r) => r.exerciseName === name);
+    const p = mine[0].prescribed as StoredPrescribed;
+    const entry = routineEntry(name);
+    const meta = metaFor(entry ?? { name });
+    return {
+      ...entry,
+      name,
+      sets: p.slotSets ?? mine.length,
+      repMin: p.repMin ?? entry?.repMin ?? meta.repRange.min,
+      repMax: p.repMax ?? entry?.repMax ?? meta.repRange.max,
+      equipment: p.equipment ?? entry?.equipment,
+    };
+  };
 
   if (workout.status !== "in_progress") {
-    const summary = sortedRows.map((r) => ({
-      exerciseName: r.exerciseName,
-      setNumber: r.setNumber,
-      prescribed: r.prescribed as { reps: number; weight: number },
-      actual: r.actual as { reps: number; weight: number; feeling: string } | null,
-    }));
-    return <Summary sets={summary} />;
+    // What each exercise is set up for next time, now that this session is in the log.
+    const next = await prescribeSlots(user.id, exerciseNames.map(specOf));
+    const summary: SummaryExercise[] = exerciseNames.map((name, i) => {
+      const mine = rows.filter((r) => r.exerciseName === name);
+      return {
+        name,
+        equipment: next[i].meta.type,
+        sets: mine.map((r) => r.actual as StoredActual | null),
+        next: {
+          action: next[i].recommendation.action,
+          weight: next[i].recommendation.weight,
+          reason: next[i].recommendation.reason,
+        },
+      };
+    });
+    return <Summary title={title} status={workout.status} exercises={summary} />;
   }
 
-  const sets: SessionSet[] = sortedRows.map((r) => {
-    const p = r.prescribed as SessionSet["prescribed"];
+  const sets: SessionSet[] = rows.map((r) => {
+    const p = r.prescribed as StoredPrescribed;
     return {
       id: r.id,
       exerciseName: r.exerciseName,
       setNumber: r.setNumber,
-      prescribed: { ...p, targetReps: p.targetReps ?? p.reps },
+      targetWeight: p.weight,
+      targetReps: p.targetReps ?? p.reps,
       completed: r.completedAt !== null,
-      actual: r.actual as SessionSet["actual"],
+      actual: r.actual ? { reps: (r.actual as StoredActual).reps, weight: (r.actual as StoredActual).weight } : null,
     };
   });
 
-  const [profile] = await db
-    .select({ rest: profiles.restTimerSeconds })
-    .from(profiles)
-    .where(eq(profiles.userId, user.id))
-    .limit(1);
-
-  // The log book behind the info icon: recent sessions, PR, and the settings
-  // that decide when this exercise earns a bump. Loaded here so tapping the
-  // icon mid-workout is instant.
-  const exerciseNames = [...new Set(sets.map((s) => s.exerciseName))];
-  const [history, prefs] = await Promise.all([
+  const [history, overrides, settings] = await Promise.all([
     recentSessionsFor(user.id, exerciseNames),
-    exercisePreferencesFor(user.id, exerciseNames),
+    incrementOverridesFor(user.id, exerciseNames),
+    settingsFor(user.id),
   ]);
+
   const info: Record<string, ExerciseInfo> = Object.fromEntries(
     exerciseNames.map((name) => {
-      const meta = inferExerciseMeta(name);
+      const spec = specOf(name);
+      const meta = metaFor(spec);
+      const first = rows.find((r) => r.exerciseName === name)!.prescribed as StoredPrescribed;
       const sessions = history[name] ?? [];
       return [
         name,
         {
-          sessions: sessions.map((s) => ({
-            finishedAt: s.finishedAt ? s.finishedAt.toISOString() : null,
-            sets: s.sets,
+          sets: spec.sets,
+          repMin: spec.repMin,
+          repMax: spec.repMax,
+          notes: spec.notes,
+          equipment: meta.type,
+          restSeconds: first.restSeconds ?? restFor(meta, settings),
+          action: first.action ?? null,
+          rationale: first.rationale ?? null,
+          sessions: sessions.slice(0, 5).map((s) => ({
+            finishedAt: s.finishedAt.toISOString(),
+            complete: s.complete,
+            sets: s.allSets,
           })),
           personalRecord: personalRecord(sessions),
-          weightIncrement: prefs[name]?.weightIncrement ?? meta.weightIncrement,
-          repRange: prefs[name]?.repRange ?? meta.repRange,
+          incrementOverride: overrides[name] ?? null,
+          defaultIncrement: incrementFor(meta, settings),
+          successSessions: settings.successSessions,
         } satisfies ExerciseInfo,
       ];
     }),
@@ -106,9 +138,9 @@ export default async function WorkoutPage({ params }: { params: Promise<{ id: st
       // on either so client state rebuilds from fresh props.
       key={`${workout.startedAt.getTime()}:${exerciseNames.join("|")}`}
       workoutId={id}
-      dayName={workout.dayKey}
+      title={title}
       initialSets={sets}
-      restSeconds={profile?.rest ?? 75}
+      restTimer={settings.restTimer}
       startedAtMs={workout.startedAt.getTime()}
       exerciseInfo={info}
     />

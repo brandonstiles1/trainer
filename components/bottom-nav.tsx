@@ -2,14 +2,14 @@
 
 import Link, { useLinkStatus } from "next/link";
 import { usePathname } from "next/navigation";
-import { Flame, Dumbbell, Settings, type LucideIcon } from "lucide-react";
+import { ChartLine, Dumbbell, Settings, type LucideIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 type Tab = { href: string; label: string; Icon: LucideIcon };
 
 const TABS: Tab[] = [
-  { href: "/today", label: "Today", Icon: Flame },
-  { href: "/workouts", label: "Workouts", Icon: Dumbbell },
+  { href: "/today", label: "Workout", Icon: Dumbbell },
+  { href: "/progress", label: "Progress", Icon: ChartLine },
   { href: "/settings", label: "Settings", Icon: Settings },
 ];
 

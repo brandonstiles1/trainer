@@ -88,13 +88,9 @@
   --surface: #f7f7f5; /* off-white page behind white cards */
   --hairline: rgba(0, 0, 0, 0.1); /* 0.5px borders */
 
-  /* set-feel chips */
-  --feel-hard-bg: #fbeae8;
-  --feel-hard-fg: #b23a36;
-  --feel-hard-border: #f0cbc6;
-  --feel-okay-bg: #fbf3da;
-  --feel-okay-fg: #927421;
-  --feel-okay-border: #ecdca6;
+  /* destructive actions and errors */
+  --danger-bg: #fbeae8;
+  --danger-fg: #b23a36;
 }
 
 .dark {

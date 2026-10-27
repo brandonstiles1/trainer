@@ -1,15 +1,28 @@
 import "server-only";
 
 import { db } from "@/lib/db";
-import { plans, workouts, workoutSets, liftEstimates, exercisePreferences } from "@/lib/db/schema";
-import { and, asc, desc, eq, inArray, isNotNull } from "drizzle-orm";
+import {
+  plans,
+  goals,
+  profiles,
+  workouts,
+  workoutSets,
+  liftEstimates,
+  exercisePreferences,
+} from "@/lib/db/schema";
+import { and, asc, desc, eq, inArray } from "drizzle-orm";
 import { estimate1RM, weightForReps, roundToStep } from "@/lib/adapt";
-import { inferExerciseMeta } from "@/lib/engine/infer-meta";
-import type { RepRange } from "@/lib/engine/exercise-meta";
+import { DEFAULT_PROGRAM } from "@/lib/program/default-program";
+import {
+  isRotationProgram,
+  nextRotationDay,
+  normalizeProgram,
+  type ProgramDay,
+  type ProgramStructure,
+} from "@/lib/program/structure";
+import { parseSettings, type ProgressionSettings } from "@/lib/program/settings";
 import { groupExerciseSessions, type ExerciseSession, type HistoryRow } from "./exercise-history";
-import { prescribeExercise } from "./prescribe-exercise";
-import { planTodayDiff } from "./plan-today-diff";
-import type { StoredPrescribed } from "./stored-set";
+import { prescribe, setRowsFor, type Prescription, type SlotSpec } from "./prescribe";
 
 /**
  * Reads and writes that take a `userId` argument, kept out of the `"use server"`
@@ -18,28 +31,110 @@ import type { StoredPrescribed } from "./stored-set";
  * here are server components and actions that have already authenticated.
  */
 
-export type PlanStructure = {
-  split: string;
-  days: Array<{
-    day: string;
-    category: string;
-    exercises: Array<{ name: string; order: number; notes?: string }>;
-  }>;
+/** Sessions kept per exercise: enough to see a 3-session miss streak through a few incomplete ones. */
+export const HISTORY_SESSIONS = 8;
+
+// ────────── program ──────────
+
+export type ActiveProgram = {
+  planId: string;
+  program: ProgramStructure;
+  /** The stored plan predates the A/B/C/D rotation (a weekday plan from the old chat flow). */
+  legacy: boolean;
 };
 
-/** Sessions kept per exercise: enough for the info panel and the stuck check. */
-export const HISTORY_SESSIONS = 3;
+/**
+ * The user's routine. A brand-new account gets the default A/B/C/D program on
+ * first visit — there's no onboarding to sit through.
+ */
+export async function activeProgramFor(userId: string): Promise<ActiveProgram> {
+  const [active] = await db
+    .select()
+    .from(plans)
+    .where(and(eq(plans.userId, userId), eq(plans.isActive, true)))
+    .limit(1);
+  if (active) {
+    return {
+      planId: active.id,
+      program: normalizeProgram(active.structure),
+      legacy: !isRotationProgram(active.structure),
+    };
+  }
+  const planId = await installProgram(userId, DEFAULT_PROGRAM);
+  return { planId, program: DEFAULT_PROGRAM, legacy: false };
+}
 
-export type ExercisePreference = { weightIncrement: number; repRange: RepRange | null };
+/**
+ * Make `program` the active plan. The previous plan is deactivated, not
+ * deleted — past workouts keep pointing at it.
+ */
+export async function installProgram(userId: string, program: ProgramStructure): Promise<string> {
+  return db.transaction(async (tx) => {
+    let [goal] = await tx
+      .select({ id: goals.id })
+      .from(goals)
+      .where(eq(goals.userId, userId))
+      .orderBy(desc(goals.createdAt))
+      .limit(1);
+    if (!goal) {
+      [goal] = await tx
+        .insert(goals)
+        .values({
+          userId,
+          goalDescription: "Lean, muscular, proportioned: wide shoulders, thick traps, upper chest, wide back.",
+          maxDaysPerWeek: 4,
+          maxMinutesSession: 40,
+        })
+        .returning({ id: goals.id });
+    }
+    await tx
+      .update(plans)
+      .set({ isActive: false, deactivatedAt: new Date() })
+      .where(and(eq(plans.userId, userId), eq(plans.isActive, true)));
+    const [row] = await tx
+      .insert(plans)
+      .values({ userId, goalId: goal.id, structure: program, isActive: true, activatedAt: new Date() })
+      .returning({ id: plans.id });
+    return row.id;
+  });
+}
 
-/** Per-exercise gym preferences: plate step and rep range. */
-export async function exercisePreferencesFor(
+/** Category of the last finished rotation workout; extras and abandoned ones don't count. */
+export async function lastRotationCategory(userId: string): Promise<string | null> {
+  const [last] = await db
+    .select({ dayKey: workouts.dayKey })
+    .from(workouts)
+    .where(
+      and(eq(workouts.userId, userId), eq(workouts.status, "completed"), eq(workouts.isExtra, false)),
+    )
+    .orderBy(desc(workouts.completedAt))
+    .limit(1);
+  return last?.dayKey ?? null;
+}
+
+export async function nextDayFor(userId: string, program: ProgramStructure): Promise<ProgramDay | null> {
+  return nextRotationDay(program, await lastRotationCategory(userId));
+}
+
+// ────────── settings & preferences ──────────
+
+export async function settingsFor(userId: string): Promise<ProgressionSettings> {
+  const [row] = await db
+    .select({ progression: profiles.progression })
+    .from(profiles)
+    .where(eq(profiles.userId, userId))
+    .limit(1);
+  return parseSettings(row?.progression);
+}
+
+/** Per-exercise load-step overrides, where the user has set one. */
+export async function incrementOverridesFor(
   userId: string,
   exerciseNames: string[],
-): Promise<Record<string, ExercisePreference>> {
+): Promise<Record<string, number>> {
   if (exerciseNames.length === 0) return {};
   const rows = await db
-    .select()
+    .select({ name: exercisePreferences.exerciseName, inc: exercisePreferences.weightIncrement })
     .from(exercisePreferences)
     .where(
       and(
@@ -47,20 +142,24 @@ export async function exercisePreferencesFor(
         inArray(exercisePreferences.exerciseName, exerciseNames),
       ),
     );
-  return Object.fromEntries(
-    rows.map((r) => [
-      r.exerciseName,
-      {
-        weightIncrement: r.weightIncrement,
-        repRange: r.repMin != null && r.repMax != null ? { min: r.repMin, max: r.repMax } : null,
-      },
-    ]),
-  );
+  return Object.fromEntries(rows.filter((r) => r.inc != null && r.inc > 0).map((r) => [r.name, r.inc!]));
 }
 
+// ────────── history ──────────
+
+const historyColumns = {
+  workoutId: workoutSets.workoutId,
+  exerciseName: workoutSets.exerciseName,
+  setNumber: workoutSets.setNumber,
+  prescribed: workoutSets.prescribed,
+  actual: workoutSets.actual,
+  finishedAt: workouts.completedAt,
+};
+
 /**
- * The last few finished sessions of each named exercise, newest first. This is
- * the log book — the only input to what today's targets are.
+ * Finished sessions of each named exercise, newest first, across every kind of
+ * workout — rotation, repeated or custom. Only workouts that were actually
+ * finished count; abandoned ones are ignored.
  */
 export async function recentSessionsFor(
   userId: string,
@@ -72,25 +171,18 @@ export async function recentSessionsFor(
   if (exerciseNames.length === 0) return byExercise;
 
   const rows = await db
-    .select({
-      workoutId: workoutSets.workoutId,
-      exerciseName: workoutSets.exerciseName,
-      setNumber: workoutSets.setNumber,
-      prescribed: workoutSets.prescribed,
-      actual: workoutSets.actual,
-      finishedAt: workouts.completedAt,
-    })
+    .select(historyColumns)
     .from(workoutSets)
     .innerJoin(workouts, eq(workouts.id, workoutSets.workoutId))
     .where(
       and(
         eq(workouts.userId, userId),
-        isNotNull(workouts.completedAt),
+        eq(workouts.status, "completed"),
         inArray(workoutSets.exerciseName, exerciseNames),
       ),
     )
     .orderBy(desc(workouts.completedAt), asc(workoutSets.setNumber))
-    .limit(600);
+    .limit(exerciseNames.length * sessionsPerExercise * 8);
 
   const history = rows as unknown as HistoryRow[];
   for (const name of exerciseNames) {
@@ -99,140 +191,88 @@ export async function recentSessionsFor(
   return byExercise;
 }
 
+/** Every finished set the user has ever logged, for the Progress screen. */
+export async function allHistoryRows(userId: string): Promise<HistoryRow[]> {
+  const rows = await db
+    .select(historyColumns)
+    .from(workoutSets)
+    .innerJoin(workouts, eq(workouts.id, workoutSets.workoutId))
+    .where(and(eq(workouts.userId, userId), eq(workouts.status, "completed")))
+    .orderBy(desc(workouts.completedAt), asc(workoutSets.setNumber));
+  return rows as unknown as HistoryRow[];
+}
+
 /**
  * Opening load for an exercise the user has never logged, from whatever they
- * told us at signup. The only place Epley math survives: a one-time conversion
- * of "I can bench 185×5" into a target at the bottom of the rep range.
+ * told us at signup. The only place Epley math survives.
  */
-async function seedWeightsFor(
-  userId: string,
-  exerciseNames: string[],
-  prefs: Record<string, ExercisePreference>,
-): Promise<Record<string, number>> {
-  if (exerciseNames.length === 0) return {};
+async function seedWeightsFor(userId: string, specs: SlotSpec[]): Promise<Record<string, number>> {
+  if (specs.length === 0) return {};
   const rows = await db
     .select()
     .from(liftEstimates)
     .where(
-      and(eq(liftEstimates.userId, userId), inArray(liftEstimates.exerciseName, exerciseNames)),
+      and(
+        eq(liftEstimates.userId, userId),
+        inArray(
+          liftEstimates.exerciseName,
+          specs.map((s) => s.name),
+        ),
+      ),
     )
     .orderBy(desc(liftEstimates.recordedAt));
 
   const seeds: Record<string, number> = {};
   for (const row of rows) {
     if (seeds[row.exerciseName] !== undefined) continue;
-    const meta = inferExerciseMeta(row.exerciseName);
-    const range = prefs[row.exerciseName]?.repRange ?? meta.repRange;
-    const step = prefs[row.exerciseName]?.weightIncrement ?? meta.weightIncrement;
+    const spec = specs.find((s) => s.name === row.exerciseName)!;
     seeds[row.exerciseName] = Math.max(
       0,
-      roundToStep(weightForReps(estimate1RM(row.weightLbs, row.reps), range.min), step),
+      roundToStep(weightForReps(estimate1RM(row.weightLbs, row.reps), spec.repMin), 5),
     );
   }
   return seeds;
 }
 
-/**
- * Today's opening targets for each exercise: last session carried forward,
- * nudged up when it was cleared. No estimates, no autoregulation — see
- * `lib/engine/progression`.
- */
-export async function prescribeWorkoutSetRows(
-  userId: string,
-  exerciseNames: string[],
-): Promise<
-  Array<{ exerciseName: string; setNumber: number; exerciseOrder: number; prescribed: StoredPrescribed }>
-> {
-  const prefs = await exercisePreferencesFor(userId, exerciseNames);
-  const sessions = await recentSessionsFor(userId, exerciseNames);
-  const firstTimers = exerciseNames.filter((n) => sessions[n].length === 0);
-  const seeds = await seedWeightsFor(userId, firstTimers, prefs);
+// ────────── prescriptions ──────────
 
-  return exerciseNames.flatMap((name, order) =>
-    prescribeExercise({
-      name,
-      sessions: sessions[name],
-      seedWeight: seeds[name],
-      weightIncrement: prefs[name]?.weightIncrement,
-      repRange: prefs[name]?.repRange ?? undefined,
-    }).map((r) => ({ exerciseName: name, exerciseOrder: order, ...r })),
+/** Recommendations for a list of exercise slots, in order. */
+export async function prescribeSlots(userId: string, specs: SlotSpec[]): Promise<Prescription[]> {
+  const names = [...new Set(specs.map((s) => s.name))];
+  const [settings, overrides, sessions] = await Promise.all([
+    settingsFor(userId),
+    incrementOverridesFor(userId, names),
+    recentSessionsFor(userId, names),
+  ]);
+  const seeds = await seedWeightsFor(
+    userId,
+    specs.filter((s) => sessions[s.name].length === 0),
+  );
+  const now = new Date();
+  return specs.map((spec) =>
+    prescribe({
+      spec,
+      sessions: sessions[spec.name],
+      settings,
+      incrementOverride: overrides[spec.name],
+      seedWeight: seeds[spec.name],
+      now,
+    }),
   );
 }
 
-export const orderedExerciseNames = (day: PlanStructure["days"][number]): string[] =>
-  day.exercises.slice().sort((a, b) => a.order - b.order).map((e) => e.name);
-
-/** Plan-day exercise order for a workout, used to sort its sets for display. */
-export async function planExerciseOrder(planId: string, dayKey: string): Promise<string[]> {
-  const [plan] = await db
-    .select({ structure: plans.structure })
-    .from(plans)
-    .where(eq(plans.id, planId))
-    .limit(1);
-  const day = (plan?.structure as PlanStructure | undefined)?.days.find((d) => d.category === dayKey);
-  return day ? orderedExerciseNames(day) : [];
+/** The `workout_sets` rows for a new workout over `specs`. */
+export async function prescribeWorkoutSetRows(userId: string, specs: SlotSpec[]) {
+  const prescriptions = await prescribeSlots(userId, specs);
+  return prescriptions.flatMap((p, order) => setRowsFor(p, order));
 }
 
-const weekdayForToday = (): string => {
-  const names = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
-  return names[new Date().getDay()];
-};
-
-/**
- * When a new plan becomes active, adjust today's in-progress workout to match it:
- * exercises already started are left intact; everything not yet started is replaced
- * with the new plan day's exercises. No-op if there's no in-progress workout or the
- * new plan has no entry for today.
- */
-export async function adjustTodayWorkout(params: {
-  userId: string;
-  newPlanId: string;
-  newStructure: PlanStructure;
-}): Promise<void> {
-  const { userId, newPlanId, newStructure } = params;
-
-  const [inProgress] = await db
-    .select()
-    .from(workouts)
-    .where(and(eq(workouts.userId, userId), eq(workouts.status, "in_progress")))
-    .limit(1);
-  if (!inProgress) return;
-
-  const planDay = newStructure.days.find((d) => d.day === weekdayForToday());
-  if (!planDay) return; // new plan makes today a rest day — leave the workout as-is
-
-  const newExercises = orderedExerciseNames(planDay);
-
-  const existingSets = await db
-    .select({
-      id: workoutSets.id,
-      exerciseName: workoutSets.exerciseName,
-      completedAt: workoutSets.completedAt,
-    })
+/** Every exercise name the user has logged at least one set of. */
+export async function loggedExerciseNames(userId: string): Promise<string[]> {
+  const rows = await db
+    .selectDistinct({ name: workoutSets.exerciseName })
     .from(workoutSets)
-    .where(eq(workoutSets.workoutId, inProgress.id));
-
-  const diff = planTodayDiff({ existingSets, newDayExercises: newExercises });
-
-  const newSetRows =
-    diff.exercisesToGenerate.length > 0
-      ? (await prescribeWorkoutSetRows(userId, diff.exercisesToGenerate)).map((r) => ({
-          workoutId: inProgress.id,
-          ...r,
-          exerciseOrder: newExercises.indexOf(r.exerciseName),
-        }))
-      : [];
-
-  await db.transaction(async (tx) => {
-    if (diff.setIdsToDelete.length > 0) {
-      await tx.delete(workoutSets).where(inArray(workoutSets.id, diff.setIdsToDelete));
-    }
-    if (newSetRows.length > 0) {
-      await tx.insert(workoutSets).values(newSetRows as (typeof workoutSets.$inferInsert)[]);
-    }
-    await tx
-      .update(workouts)
-      .set({ planId: newPlanId, dayKey: planDay.category })
-      .where(eq(workouts.id, inProgress.id));
-  });
+    .innerJoin(workouts, eq(workouts.id, workoutSets.workoutId))
+    .where(eq(workouts.userId, userId));
+  return rows.map((r) => r.name).sort();
 }

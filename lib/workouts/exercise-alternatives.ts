@@ -87,3 +87,6 @@ export function alternativesFor(name: string, exclude: string[]): string[] {
   }
   return out;
 }
+
+/** Every exercise the swap catalog knows, for pickers. */
+export const CATALOG_EXERCISES: string[] = [...new Set(Object.values(CATALOG).flat())].sort();

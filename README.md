@@ -1,12 +1,12 @@
 # Trainer
 
-A personal, mobile-first workout app. Claude designs your program, plans each day's sets with dynamic branching, and tracks body-composition progress through aligned photo overlays.
+A personal, mobile-first strength tracker. A four-day A/B/C/D rotation, one-tap set logging, and double progression that recommends the next weight from what you actually lifted. Design: `docs/superpowers/specs/2026-10-27-abcd-double-progression-design.md`.
 
 Solo project. Built for one user (me).
 
 ## Stack
 
-Next.js 16 (App Router) · React 19 · TypeScript · Tailwind CSS v4 · shadcn/ui · Supabase (Postgres + Auth + Storage) · Drizzle ORM · Claude Sonnet 4.6 · Vitest
+Next.js 16 (App Router) · React 19 · TypeScript · Tailwind CSS v4 · shadcn/ui · Supabase (Postgres + Auth + Storage) · Drizzle ORM · Vitest
 
 ## First-Time Setup
 

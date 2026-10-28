@@ -1,9 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
-  consecutiveSameTarget,
   groupExerciseSessions,
   personalRecord,
-  type ExerciseSession,
   type HistoryRow,
 } from "@/lib/workouts/exercise-history";
 
@@ -12,17 +10,15 @@ const row = (over: Partial<HistoryRow> = {}): HistoryRow => ({
   exerciseName: "barbell_curl",
   setNumber: 1,
   prescribed: { reps: 8, weight: 55, targetReps: 8 },
-  actual: { reps: 8, weight: 55, feeling: "yellow" },
+  actual: { reps: 8, weight: 55 },
   finishedAt: new Date("2026-08-01"),
   ...over,
 });
 
-const session = (weight: number, targetReps: number, reps = targetReps): ExerciseSession => ({
-  workoutId: `w-${weight}-${targetReps}-${reps}`,
-  finishedAt: new Date("2026-08-01"),
-  plannedSets: 1,
-  sets: [{ targetReps, weight, reps, feel: "medium" }],
-});
+const three = (over: Partial<HistoryRow> = {}, slotSets?: number) =>
+  [1, 2, 3].map((n) =>
+    row({ setNumber: n, prescribed: { reps: 8, weight: 55, targetReps: 8, slotSets }, ...over }),
+  );
 
 describe("groupExerciseSessions", () => {
   it("groups by workout, newest first", () => {
@@ -39,78 +35,64 @@ describe("groupExerciseSessions", () => {
   it("keeps sets in set order regardless of row order", () => {
     const sessions = groupExerciseSessions(
       [
-        row({ setNumber: 3, actual: { reps: 6, weight: 45, feeling: "red" } }),
-        row({ setNumber: 1, actual: { reps: 8, weight: 55, feeling: "green" } }),
-        row({ setNumber: 2, actual: { reps: 7, weight: 50, feeling: "yellow" } }),
+        row({ setNumber: 3, actual: { reps: 6, weight: 45 } }),
+        row({ setNumber: 1, actual: { reps: 8, weight: 55 } }),
+        row({ setNumber: 2, actual: { reps: 7, weight: 50 } }),
       ],
       "barbell_curl",
     );
     expect(sessions[0].sets.map((s) => s.weight)).toEqual([55, 50, 45]);
   });
 
-  it("ignores other exercises and skipped sets", () => {
-    const sessions = groupExerciseSessions(
-      [
-        row({ setNumber: 1 }),
-        row({ setNumber: 2, actual: null }),
-        row({ exerciseName: "bench_press", setNumber: 1 }),
-      ],
-      "barbell_curl",
-    );
-    expect(sessions[0].sets).toHaveLength(1);
+  it("a fully logged exercise is complete", () => {
+    expect(groupExerciseSessions(three(), "barbell_curl")[0].complete).toBe(true);
   });
 
-  it("counts a skipped set toward the session's planned size", () => {
-    const sessions = groupExerciseSessions(
-      [row({ setNumber: 1 }), row({ setNumber: 2 }), row({ setNumber: 3, actual: null })],
-      "barbell_curl",
-    );
-    expect(sessions[0].sets).toHaveLength(2);
-    expect(sessions[0].plannedSets).toBe(3);
+  it("a skipped prescribed set makes the session incomplete", () => {
+    const rows = three();
+    rows[2] = { ...rows[2], actual: null };
+    const [s] = groupExerciseSessions(rows, "barbell_curl");
+    expect(s.complete).toBe(false);
+    expect(s.sets).toHaveLength(2);
   });
 
-  it("drops a session where everything was skipped", () => {
-    const sessions = groupExerciseSessions([row({ actual: null })], "barbell_curl");
-    expect(sessions).toEqual([]);
+  it("a removed set (fewer rows than the slot asked for) is incomplete", () => {
+    const [s] = groupExerciseSessions(three({}, 4), "barbell_curl");
+    expect(s.complete).toBe(false);
   });
 
-  it("falls back to the prescribed reps when targetReps predates the field", () => {
-    const legacy = row({
-      prescribed: { reps: 10, weight: 55 } as HistoryRow["prescribed"],
-    });
-    expect(groupExerciseSessions([legacy], "barbell_curl")[0].sets[0].targetReps).toBe(10);
+  it("extra sets beyond the slot are kept for history but not judged", () => {
+    const rows = [
+      ...three({}, 3),
+      row({ setNumber: 4, actual: null, prescribed: { reps: 8, weight: 55, targetReps: 8, slotSets: 3 } }),
+      row({ setNumber: 5, actual: { reps: 3, weight: 55 }, prescribed: { reps: 8, weight: 55, targetReps: 8, slotSets: 3 } }),
+    ];
+    const [s] = groupExerciseSessions(rows, "barbell_curl");
+    expect(s.complete).toBe(true);
+    expect(s.sets).toHaveLength(3);
+    expect(s.allSets).toHaveLength(4);
   });
 
-  it("translates the logged feeling into a feel", () => {
-    const sessions = groupExerciseSessions(
-      [row({ actual: { reps: 8, weight: 55, feeling: "red" } })],
-      "barbell_curl",
-    );
-    expect(sessions[0].sets[0].feel).toBe("hard");
-  });
-});
-
-describe("consecutiveSameTarget", () => {
-  it("counts sessions before the newest that chased the same numbers", () => {
-    expect(consecutiveSameTarget([session(55, 8), session(55, 8), session(55, 8)])).toBe(2);
+  it("ignores other exercises and drops sessions with nothing logged", () => {
+    expect(groupExerciseSessions([row({ exerciseName: "bench_press" })], "barbell_curl")).toEqual([]);
+    expect(groupExerciseSessions([row({ actual: null })], "barbell_curl")).toEqual([]);
   });
 
-  it("stops counting at the first different target", () => {
-    expect(consecutiveSameTarget([session(55, 8), session(55, 8), session(50, 8)])).toBe(1);
+  it("reads legacy rows that still carry an Easy/Medium/Hard feeling", () => {
+    const legacy = row({ actual: { reps: 8, weight: 55, feeling: "red" } as HistoryRow["actual"] });
+    expect(groupExerciseSessions([legacy], "barbell_curl")[0].sets[0]).toEqual({ weight: 55, reps: 8 });
   });
 
-  it("is zero for a fresh target and for no history", () => {
-    expect(consecutiveSameTarget([session(55, 8), session(55, 7)])).toBe(0);
-    expect(consecutiveSameTarget([])).toBe(0);
+  it("treats a non-numeric logged value as missing data", () => {
+    const bad = row({ actual: { reps: 8, weight: null as unknown as number } });
+    expect(groupExerciseSessions([bad, row({ setNumber: 2 })], "barbell_curl")[0].complete).toBe(false);
   });
 });
 
 describe("personalRecord", () => {
   it("takes the heaviest set, breaking ties on reps", () => {
-    expect(personalRecord([session(55, 8), session(60, 5), session(60, 8)])).toEqual({
-      weight: 60,
-      reps: 8,
-    });
+    const s = (weight: number, reps: number) => ({ allSets: [{ weight, reps }] });
+    expect(personalRecord([s(55, 8), s(60, 5), s(60, 8)])).toEqual({ weight: 60, reps: 8 });
   });
 
   it("is null with no history", () => {

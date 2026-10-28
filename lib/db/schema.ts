@@ -11,7 +11,9 @@ import {
   pgEnum,
   primaryKey,
   index,
+  uniqueIndex,
 } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 
 // ────────── enums ──────────
 
@@ -34,6 +36,8 @@ export const profiles = pgTable("profiles", {
   heightIn: integer("height_in"),
   weightLbs: integer("weight_lbs"),
   restTimerSeconds: integer("rest_timer_seconds").notNull().default(75),
+  /** Increments, progression thresholds, rest timer — see `lib/program/settings`. */
+  progression: jsonb("progression").notNull().default({}),
   lastWeeklyReviewAt: timestamp("last_weekly_review_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -71,15 +75,27 @@ export const liftEstimates = pgTable("lift_estimates", {
   recordedAt: timestamp("recorded_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
-export const workouts = pgTable("workouts", {
-  id: uuid("id").primaryKey().defaultRandom(),
-  userId: uuid("user_id").notNull(),
-  planId: uuid("plan_id").notNull(),
-  dayKey: text("day_key").notNull(),
-  status: workoutStatus("status").notNull().default("in_progress"),
-  startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
-  completedAt: timestamp("completed_at", { withTimezone: true }),
-});
+export const workouts = pgTable(
+  "workouts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id").notNull(),
+    planId: uuid("plan_id").notNull(),
+    dayKey: text("day_key").notNull(),
+    /** Extra sessions count toward exercise history but don't advance the A/B/C/D rotation. */
+    isExtra: boolean("is_extra").notNull().default(false),
+    status: workoutStatus("status").notNull().default("in_progress"),
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+  },
+  // One live workout per user, enforced by the database so a double tap on
+  // Start can't open two.
+  (t) => [
+    uniqueIndex("workouts_one_in_progress_idx")
+      .on(t.userId)
+      .where(sql`${t.status} = 'in_progress'`),
+  ],
+);
 
 export const workoutSets = pgTable(
   "workout_sets",
@@ -105,8 +121,8 @@ export const exercisePreferences = pgTable(
   {
     userId: uuid("user_id").notNull(),
     exerciseName: text("exercise_name").notNull(),
-    /** Smallest load step available for this exercise in the user's gym (lbs). */
-    weightIncrement: real("weight_increment").notNull(),
+    /** Load step override for this exercise (lbs; per dumbbell for dumbbells). Null → from settings. */
+    weightIncrement: real("weight_increment"),
     /** Rep range the exercise climbs before earning a weight step. Null → the
      *  compound/isolation default inferred from the exercise name. */
     repMin: smallint("rep_min"),
@@ -132,6 +148,17 @@ export const weeklyReviews = pgTable("weekly_reviews", {
   periodStart: timestamp("period_start", { withTimezone: true }).notNull(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
+
+export const bodyWeights = pgTable(
+  "body_weights",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id").notNull(),
+    weightLbs: real("weight_lbs").notNull(),
+    recordedAt: timestamp("recorded_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("body_weights_user_id_recorded_at_idx").on(t.userId, t.recordedAt)],
+);
 
 export const photos = pgTable("photos", {
   id: uuid("id").primaryKey().defaultRandom(),

@@ -1,7 +1,7 @@
 type Row = {
   exerciseName: string;
   setNumber: number;
-  actual: { reps: number; weight: number; feeling: string } | null;
+  actual: { reps: number; weight: number } | null;
 };
 
 export function summarizeWorkout(rows: Row[]) {

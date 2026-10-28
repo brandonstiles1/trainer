@@ -1,69 +1,58 @@
 "use client";
 
-import { useState } from "react";
 import { Trophy } from "lucide-react";
-import { FEEL_LABEL, type Feel } from "@/lib/engine/feel";
-import type { RepRange } from "@/lib/engine/exercise-meta";
+import { formatSets, formatStep, formatWeight, titleCase } from "@/lib/format";
+import type { RecommendAction } from "@/lib/engine/double-progression";
 
 export type PastSession = {
   /** ISO string — Dates don't survive the server/client boundary as Dates. */
-  finishedAt: string | null;
-  sets: Array<{ targetReps: number; weight: number; reps: number; feel: Feel }>;
+  finishedAt: string;
+  /** Every prescribed set logged; only complete sessions count toward progression. */
+  complete: boolean;
+  sets: Array<{ weight: number; reps: number }>;
 };
 
 export type ExerciseInfo = {
+  sets: number;
+  repMin: number;
+  repMax: number;
+  notes?: string;
+  equipment: string;
+  restSeconds: number;
+  action: RecommendAction | null;
+  rationale: string | null;
   /** Finished sessions of this exercise, newest first. */
   sessions: PastSession[];
   personalRecord: { weight: number; reps: number } | null;
-  weightIncrement: number;
-  repRange: RepRange;
+  incrementOverride: number | null;
+  /** The step Settings gives this equipment, used when there's no override. */
+  defaultIncrement: number;
+  successSessions: number;
 };
 
-const WEIGHT_INCREMENTS = [2.5, 5, 10];
+const STEPS = [1, 2.5, 5, 10];
 
-const feelDot: Record<Feel, string> = {
-  hard: "var(--feel-hard-fg)",
-  medium: "var(--feel-okay-fg)",
-  easy: "var(--teal)",
-};
-
-const titleCase = (s: string) => s.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
-
-function relativeDay(iso: string | null): string {
-  if (!iso) return "earlier";
+function relativeDay(iso: string): string {
   const days = Math.round((Date.now() - new Date(iso).getTime()) / 86_400_000);
   if (days <= 0) return "today";
   if (days === 1) return "yesterday";
-  if (days < 7) return `${days} days ago`;
-  if (days < 14) return "last week";
+  if (days < 14) return `${days} days ago`;
   return `${Math.round(days / 7)} weeks ago`;
 }
 
-/**
- * What the info icon opens: this exercise's recent sessions, its PR, and the
- * two settings that decide when it earns a bump.
- */
+/** What the info icon opens: recent sessions, the PR, and this exercise's weight step. */
 export function ExerciseInfoSheet({
   exerciseName,
   info,
   onClose,
   onIncrementChange,
-  onRepRangeChange,
 }: {
   exerciseName: string;
   info: ExerciseInfo;
   onClose: () => void;
-  onIncrementChange: (increment: number) => void;
-  onRepRangeChange: (range: RepRange) => void;
+  onIncrementChange: (increment: number | null) => void;
 }) {
-  const [range, setRange] = useState(info.repRange);
-
-  const commitRange = (next: RepRange) => {
-    if (next.min < 1 || next.max > 30 || next.min > next.max) return;
-    setRange(next);
-    onRepRangeChange(next);
-  };
-
+  const step = info.incrementOverride ?? info.defaultIncrement;
   return (
     <div
       className="fixed inset-0 z-50 flex items-end justify-center bg-black/40 px-4 pb-8 animate-in fade-in"
@@ -74,95 +63,53 @@ export function ExerciseInfoSheet({
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-baseline justify-between gap-3">
-          <h3 className="text-base font-semibold text-foreground">{titleCase(exerciseName)}</h3>
+          <h3 className="text-base font-semibold">{titleCase(exerciseName)}</h3>
           {info.personalRecord && (
             <span className="flex shrink-0 items-center gap-1 text-[11px] font-medium text-[var(--teal)]">
               <Trophy className="size-3" />
-              PR {info.personalRecord.reps} × {info.personalRecord.weight}
+              {formatWeight(info.personalRecord.weight, info.equipment)} × {info.personalRecord.reps}
             </span>
           )}
         </div>
+        {info.notes && <p className="mt-0.5 text-xs text-muted-foreground">{info.notes}</p>}
 
-        <p className="mt-3 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-          Last time
-        </p>
+        <p className="mt-4 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">Recent</p>
         {info.sessions.length === 0 ? (
-          <p className="mt-2 text-sm text-muted-foreground">
-            No history yet — today&apos;s sets become the baseline.
-          </p>
+          <p className="mt-2 text-sm text-muted-foreground">No history yet — today becomes the baseline.</p>
         ) : (
-          <div className="mt-2 space-y-3">
-            {info.sessions.map((session, i) => (
-              <div
-                key={session.finishedAt ?? i}
-                className="rounded-[12px] border-[0.5px] border-[color:var(--hairline)] px-3 py-2.5"
-              >
-                <div className="flex items-baseline justify-between">
-                  <span className="text-xs font-medium text-foreground">
-                    {relativeDay(session.finishedAt)}
-                  </span>
-                  <span className="text-[11px] text-muted-foreground">
-                    target {Math.max(...session.sets.map((s) => s.targetReps))} reps
-                  </span>
-                </div>
-                <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-1">
-                  {session.sets.map((s, j) => (
-                    <span
-                      key={j}
-                      className={`flex items-center gap-1.5 text-sm tabular-nums ${
-                        s.reps < s.targetReps ? "text-muted-foreground" : "text-foreground"
-                      }`}
-                    >
-                      <span
-                        aria-hidden
-                        className="size-1.5 rounded-full"
-                        style={{ backgroundColor: feelDot[s.feel] }}
-                      />
-                      {s.reps} × {s.weight}
-                      <span className="sr-only">, felt {FEEL_LABEL[s.feel]}</span>
-                    </span>
-                  ))}
-                </div>
-              </div>
+          <ul className="mt-2 space-y-1.5">
+            {info.sessions.map((s) => (
+              <li key={s.finishedAt} className="flex items-baseline justify-between gap-3 text-sm tabular-nums">
+                <span className="text-xs text-muted-foreground">{relativeDay(s.finishedAt)}</span>
+                <span className={s.complete ? "" : "text-muted-foreground"}>
+                  {formatSets(s.sets, info.equipment)}
+                  {!s.complete && <span className="ml-1 text-[10px]">(incomplete)</span>}
+                </span>
+              </li>
             ))}
-          </div>
+          </ul>
         )}
 
-        <p className="mt-5 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-          Progression
-        </p>
+        <p className="mt-5 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">Progression</p>
         <p className="mt-1.5 text-xs leading-snug text-muted-foreground">
-          Clear every set and the target climbs a rep. At {range.max} reps it&apos;s{" "}
-          +{info.weightIncrement} lbs and back to {range.min}.
+          Get every set to {info.repMax} reps{" "}
+          {info.successSessions === 1 ? "once" : `${info.successSessions} sessions in a row`} and the weight goes up{" "}
+          {formatStep(step, info.equipment)}, back to {info.repMin} reps. Sets and rep range are
+          edited in Settings.
         </p>
 
         <div className="mt-3 flex items-center justify-between gap-3">
-          <span className="text-sm text-foreground">Rep range</span>
-          <div className="flex items-center gap-1.5">
-            <StepperField
-              label="min reps"
-              value={range.min}
-              onChange={(min) => commitRange({ ...range, min })}
-            />
-            <span className="text-sm text-muted-foreground">–</span>
-            <StepperField
-              label="max reps"
-              value={range.max}
-              onChange={(max) => commitRange({ ...range, max })}
-            />
-          </div>
-        </div>
-
-        <div className="mt-3 flex items-center justify-between gap-3">
-          <span className="text-sm text-foreground">Weight step</span>
+          <span className="text-sm">
+            Weight step{info.equipment === "dumbbell" && <span className="text-muted-foreground"> / dumbbell</span>}
+          </span>
           <div className="flex gap-1.5">
-            {WEIGHT_INCREMENTS.map((inc) => (
+            {STEPS.map((inc) => (
               <button
                 key={inc}
                 type="button"
-                onClick={() => onIncrementChange(inc)}
-                className={`h-9 rounded-[10px] border-[0.5px] px-3 text-sm font-medium transition-colors ${
-                  info.weightIncrement === inc
+                onClick={() => onIncrementChange(inc === info.defaultIncrement ? null : inc)}
+                className={`h-9 rounded-[10px] border-[0.5px] px-2.5 text-sm font-medium ${
+                  step === inc
                     ? "border-[var(--teal)] bg-[var(--teal)]/10 text-[var(--teal)]"
                     : "border-[color:var(--hairline)] text-muted-foreground"
                 }`}
@@ -176,45 +123,11 @@ export function ExerciseInfoSheet({
         <button
           type="button"
           onClick={onClose}
-          className="mt-5 h-11 w-full rounded-[12px] border-[0.5px] border-[color:var(--hairline)] text-sm font-medium text-foreground"
+          className="mt-5 h-11 w-full rounded-[12px] border-[0.5px] border-[color:var(--hairline)] text-sm font-medium"
         >
           Close
         </button>
       </div>
-    </div>
-  );
-}
-
-function StepperField({
-  label,
-  value,
-  onChange,
-}: {
-  label: string;
-  value: number;
-  onChange: (value: number) => void;
-}) {
-  return (
-    <div className="flex items-center rounded-[10px] border-[0.5px] border-[color:var(--hairline)]">
-      <button
-        type="button"
-        aria-label={`Decrease ${label}`}
-        onClick={() => onChange(value - 1)}
-        className="h-9 w-8 text-muted-foreground transition-colors hover:text-foreground"
-      >
-        −
-      </button>
-      <span className="w-6 text-center text-sm font-medium tabular-nums text-foreground">
-        {value}
-      </span>
-      <button
-        type="button"
-        aria-label={`Increase ${label}`}
-        onClick={() => onChange(value + 1)}
-        className="h-9 w-8 text-muted-foreground transition-colors hover:text-foreground"
-      >
-        +
-      </button>
     </div>
   );
 }

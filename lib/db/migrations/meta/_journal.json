@@ -36,6 +36,13 @@
       "when": 1787062800000,
       "tag": "0004_weekly_commentary",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1793000000000,
+      "tag": "0005_abcd_rotation",
+      "breakpoints": true
     }
   ]
 }

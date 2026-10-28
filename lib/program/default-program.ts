@@ -16,8 +16,8 @@ export const DEFAULT_PROGRAM: ProgramStructure = {
       title: "Upper Body: Width",
       exercises: [
         { name: "incline_dumbbell_press", order: 1, sets: 3, repMin: 8, repMax: 10 },
-        { name: "lat_pulldown", order: 2, sets: 3, repMin: 8, repMax: 12 },
-        { name: "dumbbell_lateral_raise", order: 3, sets: 3, repMin: 12, repMax: 15 },
+        { name: "wide_grip_lat_pulldown", order: 2, sets: 3, repMin: 8, repMax: 12 },
+        { name: "lateral_raise", order: 3, sets: 3, repMin: 12, repMax: 15 },
         { name: "chest_supported_row", order: 4, sets: 2, repMin: 10, repMax: 12, equipment: "machine", compound: true },
         { name: "dumbbell_shrug", order: 5, sets: 3, repMin: 10, repMax: 15 },
         { name: "cable_crunch", order: 6, sets: 2, repMin: 12, repMax: 15, equipment: "machine" },
@@ -41,7 +41,7 @@ export const DEFAULT_PROGRAM: ProgramStructure = {
       title: "Chest, Shoulders + Traps",
       exercises: [
         { name: "dumbbell_bench_press", order: 1, sets: 3, repMin: 8, repMax: 10 },
-        { name: "seated_dumbbell_shoulder_press", order: 2, sets: 3, repMin: 8, repMax: 10 },
+        { name: "dumbbell_shoulder_press", order: 2, sets: 3, repMin: 8, repMax: 10 },
         { name: "cable_lateral_raise", order: 3, sets: 3, repMin: 12, repMax: 15 },
         { name: "incline_cable_fly", order: 4, sets: 2, repMin: 10, repMax: 15, compound: false },
         { name: "dumbbell_shrug", order: 5, sets: 3, repMin: 10, repMax: 15 },
